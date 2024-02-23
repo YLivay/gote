@@ -39,14 +39,10 @@ func NewBackwardsLineScanner(reader io.ReadSeeker, chunkSize int) (*BackwardsLin
 }
 
 func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
-	var nlIdx int
-	var curChunk *readChunk
 	var err error
 
-	if s.nextNewLine != -1 {
-		curChunk = s.chunks[len(s.chunks)-1]
-		nlIdx = s.nextNewLine
-	} else {
+	// Read more data if we didn't find a newline yet.
+	if s.nextNewLine == -1 {
 		_, err = s.readMore()
 		if err != nil {
 			s.lastErr = err
@@ -54,34 +50,61 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 				return nil, err
 			}
 		}
-
-		curChunk = s.chunks[len(s.chunks)-1]
-		nlIdx = bytes.LastIndexByte(curChunk.buf, '\n')
 	}
 
-	// If we have a newline or we reached the start of the file
+	numChunks := len(s.chunks)
+
+	// If the last chunk started with a
+	if numChunks == 0 {
+		return []byte{}, io.EOF
+	}
+
+	curChunk := s.chunks[numChunks-1]
+	var nlIdx int
+	if s.nextNewLine == -1 {
+		nlIdx = bytes.LastIndexByte(curChunk.buf, '\n')
+	} else {
+		nlIdx = s.nextNewLine
+	}
+
+	// If we found a newline or we reached the start of the file, startt
+	// constructing the result line from our buffers.
 	if nlIdx != -1 || err == io.EOF {
-		// Start constructing the result line.
-		lineLen := 0
-		for _, chunk := range s.chunks {
-			lineLen += chunk.len
+		// Calculate the length of the line so we can allocate a buffer for it
+		// once without reallocations.
+
+		// The first chunk is partial. We only consider the bytes after the newline.
+		lineLen := curChunk.len - nlIdx - 1
+		// The rest of the chunks are full, so we consider all of their bytes.
+		for i := numChunks - 2; i >= 0; i-- {
+			lineLen += s.chunks[i].len
 		}
 		line := make([]byte, lineLen)
 
-		written := 0
-		for i := len(s.chunks) - 1; i >= 0; i-- {
+		// Copy the bytes from the chunks into the result line.
+		written := copy(line, curChunk.buf[nlIdx+1:curChunk.len]) // Note, the first chunk is partial.
+		// The rest of the chunks are full.
+		for i := numChunks - 2; i >= 0; i-- {
 			written += copy(line[written:], s.chunks[i].buf[:s.chunks[i].len])
 		}
 
 		// Cleanup to prep for the next read.
 		s.chunks = make([]*readChunk, 0)
 
-		if nlIdx > 0 {
+		if nlIdx >= 0 {
 			// We need to save the bytes before the new line in curChunk.buf. These are
 			// the end of the NEXT line we'll be reading.
-			remainingChunk := &readChunk{
-				buf: curChunk.buf[:nlIdx],
-				len: nlIdx,
+			var remainingChunk *readChunk
+			if nlIdx > 0 {
+				remainingChunk = &readChunk{
+					buf: curChunk.buf[:nlIdx],
+					len: nlIdx,
+				}
+			} else {
+				remainingChunk = &readChunk{
+					buf: []byte{},
+					len: 0,
+				}
 			}
 
 			s.chunks = append(s.chunks, remainingChunk)
@@ -90,7 +113,12 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 			s.nextNewLine = -1
 		}
 
-		return line, nil
+		// Do not return EOF if we still have data to read.
+		if nlIdx != -1 && err == io.EOF {
+			err = nil
+		}
+
+		return line, err
 	}
 
 	return s.ReadLine()
