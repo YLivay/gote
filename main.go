@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/YLivay/gote/log"
+	"github.com/YLivay/gote/reader"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 		log.Fatalln("Failed to open test file:", err)
 	}
 
-	reader, err := NewBackwardsLineScanner(f, 5)
+	reader, err := reader.NewBackwardsLineScanner(f, 5)
 	if err != nil {
 		log.Fatalln("Failed to initialize backwards scanner:", err)
 	}
