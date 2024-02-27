@@ -1,45 +1,114 @@
 package reader
 
-import "io"
+import (
+	"io"
+)
 
-func ReadBackwards(reader io.ReadSeeker, buf []byte) (n int, newPos int64, err error) {
-	pos, err := reader.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	n, newPos, err = ReadBackwardsFrom(reader, pos, buf)
-	// If -1 is returned it means either no seek was performed or a seek errored
-	// out, so we should assume our seek position has not moved.
-	if newPos == -1 {
-		newPos = pos
-	}
-	return n, newPos, err
+// BackwardsReadResult is a result of reading backwards.
+type BackwardsReadResult struct {
+	// N is the amount of bytes read.
+	N int
+	// NextPos is the position of the first byte that was read. This is the
+	// position you should pass to the next call to ReadBackwardsFrom to
+	// continue reading. This may be -1 if [ReadBackwards] failed to determine its
+	// current seek position so it is impossible to determine the next position.
+	NextPos int64
+	// Seeked is true if a seek operation was performed.
+	//
+	// Note: When this is true you can assume the reader's actual seek position
+	// is NextPos plus N. When this is false, the reader's seek position is
+	// unchanged.
+	Seeked bool
 }
 
-func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (n int, newPos int64, err error) {
+// ReadBackwards reads backwards up to len(buf) bytes from the given reader.
+//
+// Reading backwards is implemented by first determining the current seek
+// position, then calling ReadBackwardsFrom. See [ReadBackwardsFrom] for more
+// info.
+//
+// If failed to determine the current seek position, the result's NextPos will be -1.
+func ReadBackwards(reader io.ReadSeeker, buf []byte) (BackwardsReadResult, error) {
+	curPos, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return BackwardsReadResult{N: 0, NextPos: -1, Seeked: false}, err
+	}
+
+	result, err := ReadBackwardsFrom(reader, curPos, buf)
+	if !result.Seeked {
+		result.NextPos = curPos
+		result.Seeked = true
+	}
+
+	return result, err
+}
+
+// ReadBackwardsFrom reads backwards up to len(buf) bytes from the given reader,
+// starting from a given position.
+//
+// Reading backwards is implemented by seeking to fromPos minus
+// len(buf) (or up to the start of the file), then reading forwards normally
+// using [io.ReadSeeker.Read].
+//
+// To continue reading backwards, pass the result's NextPos to the next call to
+// ReadBackwardsFrom as fromPos:
+//
+//	result, _ := ReadBackwardsFrom(reader, somePos, buf1)
+//	ReadBackwardsFrom(reader, result.NextPos, buf2)
+func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (BackwardsReadResult, error) {
 	if fromPos < 0 {
 		panic("fromPos must be non-negative")
 	}
 
-	requested := int64(len(buf))
+	requested := len(buf)
 
 	// When we can determine that a read is trivial (starting from 0, or given a
-	// buffer size of 0) we early out. In this case we don't attempt to figure
-	// out the new position, so simply return -1.
+	// buffer size of 0) we early out.
 	if fromPos == 0 || requested == 0 {
-		return 0, -1, nil
+		return BackwardsReadResult{N: 0, NextPos: fromPos, Seeked: false}, nil
 	}
 
-	n = 0
-	toRead := min(fromPos, requested)
-	_, err = reader.Seek(fromPos-toRead, io.SeekStart)
+	var leftToRead int
+	if fromPos < int64(requested) {
+		leftToRead = int(fromPos)
+	} else {
+		leftToRead = requested
+	}
+
+	nextPos := fromPos - int64(leftToRead)
+	_, err := reader.Seek(nextPos, io.SeekStart)
 	if err != nil {
-		// In case of a seek error return -1 to indicate that the position has
-		// not changed.
-		return n, -1, err
+		return BackwardsReadResult{
+			N:       0,
+			NextPos: -1,
+			Seeked:  false, // Assume no seek was performed on error.
+		}, err
 	}
 
-	n, err = reader.Read(buf[:toRead])
-	return n, fromPos - toRead + int64(n), err
+	// // Attempt to read forwards up to 5 times in case fewer bytes are read than
+	// // requested.
+	// n := 0
+	// totalRead := 0
+	// attemptsLeft := 5
+	// for ; attemptsLeft > 0 && leftToRead > 0; attemptsLeft-- {
+	// 	n, err = reader.Read(buf[totalRead : totalRead+leftToRead])
+
+	// 	totalRead += n
+	// 	leftToRead -= n
+	// 	if leftToRead < 0 {
+	// 		err = io.ErrShortBuffer
+	// 	}
+
+	// 	if err != nil {
+	// 		break
+	// 	}
+	// }
+
+	totalRead, err := reader.Read(buf[:leftToRead])
+
+	return BackwardsReadResult{
+		N:       totalRead,
+		NextPos: nextPos,
+		Seeked:  true,
+	}, err
 }

@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// createTestFiles creates a temporary test file with the given contents and
+// seek. It returns the open file handle and the seek position from the start of
+// the file. If no seek was given, it defaults to the start of the file.
 func createTestFile(t *testing.T, contents string, seekStuff ...int) (*os.File, int64) {
 	filepath := path.Join(t.TempDir(), "test.txt")
 	if err := os.WriteFile(filepath, []byte(contents), 0644); err != nil {

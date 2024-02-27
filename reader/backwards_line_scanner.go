@@ -130,8 +130,9 @@ func (s *BackwardsLineScanner) readMore() (int, error) {
 	}
 
 	buf := make([]byte, s.chunkSize)
-	n, curPos, err := ReadBackwardsFrom(s.reader, s.nextPos, buf)
-	s.nextPos = curPos - int64(n)
+	result, err := ReadBackwardsFrom(s.reader, s.nextPos, buf)
+	n := result.N
+	s.nextPos = result.NextPos
 
 	s.chunks = append(s.chunks, &readChunk{
 		buf: buf,
