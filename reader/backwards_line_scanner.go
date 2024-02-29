@@ -132,6 +132,43 @@ func (s *BackwardsLineScanner) readMore() (int, error) {
 	buf := make([]byte, s.chunkSize)
 	result, err := ReadBackwardsFrom(s.reader, s.nextPos, buf)
 	n := result.N
+
+	// In case of a partial read, try reading the remaining bytes.
+	leftToRead := result.LeftToRead
+	if leftToRead > 0 {
+		// If no data is returned at all for a few consecutive reads, we stop
+		// trying and return io.ErrNoProgress.
+		emptyReads := 0
+		maxEmptyReads := 10
+		nPart := 0
+		for leftToRead > 0 {
+			nPart, err = s.reader.Read(buf[n : n+leftToRead])
+
+			n += nPart
+			leftToRead -= nPart
+
+			if err != nil {
+				break
+			}
+
+			// Sanity check for bad readers.
+			if leftToRead < 0 {
+				err = io.ErrShortBuffer
+				break
+			}
+
+			if nPart == 0 {
+				emptyReads++
+				if emptyReads >= maxEmptyReads {
+					err = io.ErrNoProgress
+					break
+				}
+			} else {
+				emptyReads = 0
+			}
+		}
+	}
+
 	s.nextPos = result.NextPos
 
 	s.chunks = append(s.chunks, &readChunk{
@@ -141,7 +178,6 @@ func (s *BackwardsLineScanner) readMore() (int, error) {
 
 	// EOFs are not supported because it means the file got shorter after the
 	// reader was initialized. This read is basically undefined behavior.
-	// todo: make sure eof doesnt get returned if we read exactly until the end of the file.
 	if err == io.EOF {
 		return n, io.ErrUnexpectedEOF
 	}
@@ -149,8 +185,7 @@ func (s *BackwardsLineScanner) readMore() (int, error) {
 	// If we reached the start of the file.
 	if s.nextPos == 0 {
 		return n, io.EOF
-	} else if n < s.chunkSize {
-		// If we didn't, but we still read less than a full chunk it means we
+	} else if leftToRead > 0 {
 		var errStr string
 		if err != nil {
 			errStr = err.Error()

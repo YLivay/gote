@@ -19,6 +19,11 @@ type BackwardsReadResult struct {
 	// is NextPos plus N. When this is false, the reader's seek position is
 	// unchanged.
 	Seeked bool
+	// LeftToRead keeps track of how many bytes are left to read. In case of a
+	// short read where fewer bytes are returned than requested, this will be
+	// the number of bytes left to read. When it is -1 it means no read attempt
+	// was made.
+	LeftToRead int
 }
 
 // ReadBackwards reads backwards up to len(buf) bytes from the given reader.
@@ -31,7 +36,7 @@ type BackwardsReadResult struct {
 func ReadBackwards(reader io.ReadSeeker, buf []byte) (BackwardsReadResult, error) {
 	curPos, err := reader.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return BackwardsReadResult{N: 0, NextPos: -1, Seeked: false}, err
+		return BackwardsReadResult{N: 0, NextPos: -1, Seeked: false, LeftToRead: -1}, err
 	}
 
 	result, err := ReadBackwardsFrom(reader, curPos, buf)
@@ -46,15 +51,21 @@ func ReadBackwards(reader io.ReadSeeker, buf []byte) (BackwardsReadResult, error
 // ReadBackwardsFrom reads backwards up to len(buf) bytes from the given reader,
 // starting from a given position.
 //
-// Reading backwards is implemented by seeking to fromPos minus
-// len(buf) (or up to the start of the file), then reading forwards normally
-// using [io.ReadSeeker.Read].
+// Reading backwards is implemented by seeking to fromPos minus len(buf) (or up
+// to the start of the file), then reading forwards normally using
+// [io.ReadSeeker.Read].
 //
 // To continue reading backwards, pass the result's NextPos to the next call to
 // ReadBackwardsFrom as fromPos:
 //
 //	result, _ := ReadBackwardsFrom(reader, somePos, buf1)
 //	ReadBackwardsFrom(reader, result.NextPos, buf2)
+//
+// Note: in case of a partial read (where fewer bytes were returned than
+// requested), this function makes no attempt to read the remaining bytes
+// because the file may change between reads which would make the read
+// inconsistent. Instead, the result's LeftToRead will be set to the number of
+// bytes left to read and it is up to the caller to decide what to do.
 func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (BackwardsReadResult, error) {
 	if fromPos < 0 {
 		panic("fromPos must be non-negative")
@@ -65,7 +76,7 @@ func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (Backwar
 	// When we can determine that a read is trivial (starting from 0, or given a
 	// buffer size of 0) we early out.
 	if fromPos == 0 || requested == 0 {
-		return BackwardsReadResult{N: 0, NextPos: fromPos, Seeked: false}, nil
+		return BackwardsReadResult{N: 0, NextPos: fromPos, Seeked: false, LeftToRead: -1}, nil
 	}
 
 	var leftToRead int
@@ -79,9 +90,10 @@ func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (Backwar
 	_, err := reader.Seek(nextPos, io.SeekStart)
 	if err != nil {
 		return BackwardsReadResult{
-			N:       0,
-			NextPos: -1,
-			Seeked:  false, // Assume no seek was performed on error.
+			N:          0,
+			NextPos:    -1,
+			Seeked:     false, // Assume no seek was performed on error.
+			LeftToRead: -1,
 		}, err
 	}
 
@@ -105,10 +117,12 @@ func ReadBackwardsFrom(reader io.ReadSeeker, fromPos int64, buf []byte) (Backwar
 	// }
 
 	totalRead, err := reader.Read(buf[:leftToRead])
+	leftToRead -= totalRead
 
 	return BackwardsReadResult{
-		N:       totalRead,
-		NextPos: nextPos,
-		Seeked:  true,
+		N:          totalRead,
+		NextPos:    nextPos,
+		Seeked:     true,
+		LeftToRead: leftToRead,
 	}, err
 }
