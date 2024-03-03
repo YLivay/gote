@@ -10,7 +10,7 @@ import (
 func TestThis(t *testing.T) {
 	file, _ := utils.CreateTestFile(t, "0123456789abcdef\nghijklmnopqrstuv\nwxyz\n")
 
-	application, err := NewApplication(10, 10, false, file.Name())
+	application, err := NewApplication(10, 10, false, file)
 	assert.NoError(t, err)
 
 	buffer := application.buffer

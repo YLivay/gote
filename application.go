@@ -1,5 +1,7 @@
 package main
 
+import "os"
+
 type Application struct {
 	// The width of the terminal
 	width int
@@ -9,20 +11,21 @@ type Application struct {
 	// If true, continue reading from reader forwards
 	followMode bool
 
+	// The input file name as given to the os.Open function for inputReader
 	inputFname string
 
 	buffer *Buffer
 }
 
-func NewApplication(width, height int, followMode bool, inputFname string) (*Application, error) {
+func NewApplication(width, height int, followMode bool, inputReader *os.File) (*Application, error) {
 	application := &Application{
 		width:      width,
 		height:     height,
 		followMode: followMode,
-		inputFname: inputFname,
+		inputFname: inputReader.Name(),
 	}
 
-	buffer, err := NewBuffer(width, height, followMode, inputFname)
+	buffer, err := NewBuffer(width, height, followMode, inputReader)
 	if err != nil {
 		return nil, err
 	}

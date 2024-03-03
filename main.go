@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/YLivay/gote/log"
+	"github.com/gdamore/tcell/v2"
 )
 
 func main() {
@@ -31,9 +33,68 @@ func run() error {
 	filename := "-"
 	reader, cleanupReader, err := prepareReader(filename)
 	if err != nil {
-		return errors.New("Failed to prepare reader: " + err.Error())
+		return fmt.Errorf("failed to prepare reader: %w", err)
 	}
 	defer cleanupReader()
+
+	screen, err := tcell.NewScreen()
+	if err != nil {
+		return fmt.Errorf("failed to create terminal screen: %w", err)
+	}
+	if err := screen.Init(); err != nil {
+		return fmt.Errorf("failed to initialize terminal screen: %w", err)
+	}
+
+	quit := func() {
+		// You have to catch panics in a defer, clean up, and
+		// re-raise them - otherwise your application can
+		// die without leaving any diagnostic trace.
+		maybePanic := recover()
+		screen.Fini()
+		if maybePanic != nil {
+			panic(maybePanic)
+		}
+	}
+	defer quit()
+
+	width, height := screen.Size()
+	application, err := NewApplication(width, height, true, reader)
+	if err != nil {
+		return fmt.Errorf("failed to create application: %w", err)
+	}
+
+	if err := application.buffer.SeekAndPopulate(0); err != nil {
+		return fmt.Errorf("failed to populate the application buffer: %w", err)
+	}
+
+	screen.Clear()
+	screen.SetContent(0, 0, 'H', nil, tcell.StyleDefault)
+	screen.SetContent(1, 0, 'e', nil, tcell.StyleDefault)
+	screen.SetContent(2, 0, 'l', nil, tcell.StyleDefault)
+	screen.SetContent(3, 0, 'l', nil, tcell.StyleDefault)
+	screen.SetContent(4, 0, 'o', nil, tcell.StyleDefault)
+
+	go func() {
+		for {
+			// Update screen
+			screen.Show()
+
+			// Poll event
+			ev := screen.PollEvent()
+
+			// Process event
+			switch ev := ev.(type) {
+			case *tcell.EventResize:
+				screen.Sync()
+			case *tcell.EventKey:
+				if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
+					cancelCtx()
+				}
+			}
+		}
+	}()
+
+	<-ctx.Done()
 
 	// Check if os.Stdin is a tty. If it isn't, we need to initialize a new one for user input.
 	tty, cleanupTty, err := ensureTty()

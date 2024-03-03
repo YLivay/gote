@@ -49,11 +49,10 @@ type Buffer struct {
 	records *bufferRecordList
 }
 
-func NewBuffer(width, height int, followMode bool, inputFname string) (*Buffer, error) {
-	fwdReader, err := os.Open(inputFname)
-	if err != nil {
-		return nil, err
-	}
+func NewBuffer(width, height int, followMode bool, inputReader *os.File) (*Buffer, error) {
+	inputFname := inputReader.Name()
+
+	fwdReader := inputReader
 
 	bkdReader, err := os.Open(inputFname)
 	if err != nil {

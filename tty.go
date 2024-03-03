@@ -53,3 +53,12 @@ func ensureTty() (ttyReader TTY, cleanupFn func() error, err error) {
 
 	return ttyReader, cleanupFn, nil
 }
+
+func getSize() (int, int, error) {
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return 0, 0, errors.New("Failed to get terminal size: " + err.Error())
+	}
+
+	return width, height, nil
+}
