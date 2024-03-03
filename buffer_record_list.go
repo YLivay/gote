@@ -2,17 +2,6 @@ package main
 
 import "sync"
 
-type BufferRecordList interface {
-	Append(r *record)
-	Prepend(r *record)
-	PopFirst() *record
-	PopLast() *record
-	Clear()
-	ScrollUp(lines int) int
-	ScrollDown(lines int) int
-	GetLinesToRender(lineCount int) []string
-}
-
 type bufferRecordList struct {
 	mu   *sync.Mutex
 	head *bufferRecord
@@ -67,6 +56,7 @@ func (l *bufferRecordList) WithLock(f func(*bufferRecordList) any) any {
 	return f(unlockedInst)
 }
 
+// Append adds a record to the end of the list.
 func (l *bufferRecordList) Append(r *record) {
 	if !l.withinLock {
 		l.mu.Lock()
@@ -89,6 +79,7 @@ func (l *bufferRecordList) Append(r *record) {
 	}
 }
 
+// Prepend adds a record to the end of the list.
 func (l *bufferRecordList) Prepend(r *record) {
 	if !l.withinLock {
 		l.mu.Lock()
@@ -111,54 +102,74 @@ func (l *bufferRecordList) Prepend(r *record) {
 	}
 }
 
+// PopFirst removes the first record from the list and returns it.
+//
+// If the screen top is the same as the record being removed, the screen top is
+// moved to the next record and the screen top offset is reset to 0.
 func (l *bufferRecordList) PopFirst() *record {
 	if !l.withinLock {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 	}
 
-	if l.head == nil {
+	head := l.head
+	if head == nil {
 		return nil
 	}
 
-	r := l.head.record
-
-	next := l.head.next
+	next := head.next
 	l.head = next
 
 	if next == nil {
 		l.tail = nil
+		l.screenTop = nil
+		l.screenTopOffset = 0
 	} else {
+		if l.screenTop == head {
+			l.screenTop = next
+			l.screenTopOffset = 0
+		}
 		next.prev = nil
 	}
 
-	return r
+	return head.record
 }
 
+// PopLast removes the last record from the list and returns it.
+//
+// If the screen top is the same as the record being removed, the screen top is
+// moved to the previous record and the screen top offset is reset to 0.
 func (l *bufferRecordList) PopLast() *record {
 	if !l.withinLock {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 	}
 
-	if l.tail == nil {
+	tail := l.tail
+	if tail == nil {
 		return nil
 	}
 
-	r := l.tail.record
-
-	prev := l.tail.prev
+	prev := tail.prev
 	l.tail = prev
 
 	if prev == nil {
 		l.head = nil
+		l.screenTop = nil
+		l.screenTopOffset = 0
 	} else {
+		if l.screenTop == tail {
+			l.screenTop = prev
+			l.screenTopOffset = 0
+		}
 		prev.next = nil
 	}
 
-	return r
+	return tail.record
 }
 
+// Clear clears all the records from this list and resets the screen top and
+// screen top offset.
 func (l *bufferRecordList) Clear() {
 	if !l.withinLock {
 		l.mu.Lock()
@@ -171,6 +182,9 @@ func (l *bufferRecordList) Clear() {
 	l.screenTopOffset = 0
 }
 
+// ScrollUp attempts to move the screen top up by the given number of lines.
+//
+// Returns the number of lines actually moved.
 func (l *bufferRecordList) ScrollUp(lines int) int {
 	if !l.withinLock {
 		l.mu.Lock()
@@ -209,6 +223,9 @@ func (l *bufferRecordList) ScrollUp(lines int) int {
 	}
 }
 
+// ScrollDown attempts to move the screen top down by the given number of lines.
+//
+// Returns the number of lines actually moved.
 func (l *bufferRecordList) ScrollDown(lines int) int {
 	if !l.withinLock {
 		l.mu.Lock()
@@ -248,6 +265,7 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 	}
 }
 
+// GetLinesToRender returns the lines to render on the screen starting from screen top and screen top offset.
 func (l *bufferRecordList) GetLinesToRender(lineCount int) []string {
 	if !l.withinLock {
 		l.mu.Lock()

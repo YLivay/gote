@@ -22,7 +22,7 @@ func NewApplication(width, height int, followMode bool, inputFname string) (*App
 		inputFname: inputFname,
 	}
 
-	buffer, err := NewBuffer(application)
+	buffer, err := NewBuffer(width, height, followMode, inputFname)
 	if err != nil {
 		return nil, err
 	}
