@@ -10,37 +10,16 @@ import (
 	"time"
 
 	"github.com/YLivay/gote/log"
-	"github.com/YLivay/gote/reader"
 )
 
 func main() {
-	if err := os.WriteFile("test.txt", []byte("Hello\nhi!"), 0644); err != nil {
-		log.Fatalln("Failed to write test file:", err)
-	}
-
-	f, err := os.Open("test.txt")
+	err := run()
 	if err != nil {
-		log.Fatalln("Failed to open test file:", err)
+		log.Fatalln(err.Error())
 	}
 
-	reader, err := reader.NewBackwardsLineScanner(f, 5)
-	if err != nil {
-		log.Fatalln("Failed to initialize backwards scanner:", err)
-	}
-
-	line, err := reader.ReadLine()
-	if err != nil {
-		log.Fatalln("Failed to read line:", err)
-	}
-	log.Println("Read line:", string(line))
-
-	// err := run()
-	// if err != nil {
-	// 	log.Fatalln(err.Error())
-	// }
-
-	// // Nothing to do
-	// log.Println("All done")
+	// Nothing to do
+	log.Println("All done")
 }
 
 func run() error {

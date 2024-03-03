@@ -2,9 +2,13 @@ package reader
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrUseAfterClose is returned when the scanner is used after Close() was called.
+var ErrUseAfterClose = fmt.Errorf("scanner used after Close()")
 
 type BackwardsLineScanner struct {
 	reader      io.ReadSeeker
@@ -20,8 +24,28 @@ type readChunk struct {
 	len int
 }
 
-func NewBackwardsLineScanner(reader io.ReadSeeker, chunkSize int) (*BackwardsLineScanner, error) {
-	pos, err := reader.Seek(0, io.SeekEnd)
+func NewBackwardsLineScanner(reader io.ReadSeeker, chunkSize int, seekAndWhence ...int64) (*BackwardsLineScanner, error) {
+	var seek, whence int64
+	switch len(seekAndWhence) {
+	case 0:
+		seek = 0
+		whence = io.SeekEnd
+	case 1:
+		seek = seekAndWhence[0]
+		if seek >= 0 {
+			whence = io.SeekStart
+		} else {
+			whence = io.SeekEnd
+			seek = -seek
+		}
+	case 2:
+		seek = seekAndWhence[0]
+		whence = seekAndWhence[1]
+	default:
+		panic("Too many arguments")
+	}
+
+	pos, err := reader.Seek(int64(seek), int(whence))
 	if err != nil {
 		return nil, err
 	}
@@ -38,8 +62,18 @@ func NewBackwardsLineScanner(reader io.ReadSeeker, chunkSize int) (*BackwardsLin
 	return scanner, nil
 }
 
-func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
+func (s *BackwardsLineScanner) Close() error {
+	s.chunks = nil
+	s.lastErr = ErrUseAfterClose
+	return nil
+}
+
+func (s *BackwardsLineScanner) ReadLine() ([]byte, int64, error) {
 	var err error
+
+	if s.lastErr == ErrUseAfterClose {
+		return nil, -1, s.lastErr
+	}
 
 	// Read more data if we didn't find a newline yet.
 	if s.nextNewLine == -1 {
@@ -47,7 +81,7 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 		if err != nil {
 			s.lastErr = err
 			if err != io.EOF {
-				return nil, err
+				return nil, -1, err
 			}
 		}
 	}
@@ -56,7 +90,7 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 
 	// If the last chunk started with a
 	if numChunks == 0 {
-		return []byte{}, io.EOF
+		return []byte{}, 0, io.EOF
 	}
 
 	curChunk := s.chunks[numChunks-1]
@@ -67,7 +101,7 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 		nlIdx = s.nextNewLine
 	}
 
-	// If we found a newline or we reached the start of the file, startt
+	// If we found a newline or we reached the start of the file, start
 	// constructing the result line from our buffers.
 	if nlIdx != -1 || err == io.EOF {
 		// Calculate the length of the line so we can allocate a buffer for it
@@ -118,7 +152,9 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, error) {
 			err = nil
 		}
 
-		return line, err
+		lineStartedAt := s.nextPos + int64(nlIdx) + 1
+
+		return line, lineStartedAt, err
 	}
 
 	return s.ReadLine()
@@ -186,14 +222,11 @@ func (s *BackwardsLineScanner) readMore() (int, error) {
 	if s.nextPos == 0 {
 		return n, io.EOF
 	} else if leftToRead > 0 {
-		var errStr string
-		if err != nil {
-			errStr = err.Error()
-		} else {
-			errStr = "no error was returned"
+		if err == nil {
+			err = errors.New("no error was returned")
 		}
 
-		return n, fmt.Errorf("expected to read %d bytes, but only read %d: %s", s.chunkSize, n, errStr)
+		return n, fmt.Errorf("expected to read %d bytes, but only read %d: %w", s.chunkSize, n, err)
 	}
 
 	return n, err

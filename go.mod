@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/mattn/go-tty v0.0.5
+	github.com/rivo/uniseg v0.4.7
 	github.com/stretchr/testify v1.8.4
 	golang.org/x/term v0.17.0
 )
