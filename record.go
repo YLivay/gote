@@ -1,7 +1,5 @@
 package main
 
-import "github.com/YLivay/gote/utils"
-
 type record struct {
 	// Byte offset of the start of the record in the input file.
 	byteOffset int64
@@ -21,6 +19,6 @@ func newRecord(byteOffset int64, buf []byte, wrapWidth int) *record {
 	return &record{
 		byteOffset: byteOffset,
 		buf:        buf,
-		lines:      utils.WordWrap(string(buf), wrapWidth),
+		lines:      WordWrap(string(buf), wrapWidth),
 	}
 }

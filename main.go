@@ -28,16 +28,17 @@ func run() error {
 	cleanupOsSignals := setupOsSignals(ctx, cancelCtx)
 	defer cleanupOsSignals()
 
-	filename := "-"
+	filename := "testfile"
 	reader, cleanupReader, err := prepareReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to prepare reader: %w", err)
 	}
 	defer cleanupReader()
 
-	application := NewApplication(reader, true)
-
-	application.Run(ctx, cancelCtx)
+	application := NewApplication(reader, false)
+	if err = application.Run(ctx, cancelCtx); err != nil && err != context.Canceled {
+		return fmt.Errorf("failed to run application: %w", err)
+	}
 
 	// go func() {
 	// 	for {

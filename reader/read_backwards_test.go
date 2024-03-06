@@ -5,12 +5,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/YLivay/gote/utils"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestReadBackwards_ReadsFromEnd(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 0, io.SeekEnd)
+	f, _ := createTestFile(t, "hello", 0, io.SeekEnd)
 
 	b := make([]byte, 2)
 	result, err := ReadBackwards(f, b)
@@ -21,7 +20,7 @@ func TestReadBackwards_ReadsFromEnd(t *testing.T) {
 }
 
 func TestReadBackwards_ReadsFromMiddle(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 3)
+	f, _ := createTestFile(t, "hello", 3)
 
 	b := make([]byte, 2)
 	result, err := ReadBackwards(f, b)
@@ -32,7 +31,7 @@ func TestReadBackwards_ReadsFromMiddle(t *testing.T) {
 }
 
 func TestReadBackwards_ReadsToStart(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 2)
+	f, _ := createTestFile(t, "hello", 2)
 
 	b := make([]byte, 2)
 	result, err := ReadBackwards(f, b)
@@ -43,7 +42,7 @@ func TestReadBackwards_ReadsToStart(t *testing.T) {
 }
 
 func TestReadBackwards_CappedByStart(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 2)
+	f, _ := createTestFile(t, "hello", 2)
 
 	b := make([]byte, 3)
 	result, err := ReadBackwards(f, b)
@@ -55,7 +54,7 @@ func TestReadBackwards_CappedByStart(t *testing.T) {
 }
 
 func TestReadBackwards_DoesNotOverwriteUnusedBuffer(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 2)
+	f, _ := createTestFile(t, "hello", 2)
 
 	b := []byte{'a', 'b', 'c'}
 	result, err := ReadBackwards(f, b)
@@ -67,7 +66,7 @@ func TestReadBackwards_DoesNotOverwriteUnusedBuffer(t *testing.T) {
 }
 
 func TestReadBackwards_TrivialZeroRead(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 0, io.SeekEnd)
+	f, _ := createTestFile(t, "hello", 0, io.SeekEnd)
 
 	b := make([]byte, 0)
 	result, err := ReadBackwards(f, b)
@@ -77,7 +76,7 @@ func TestReadBackwards_TrivialZeroRead(t *testing.T) {
 }
 
 func TestReadBackwards_CappedZeroRead(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello")
+	f, _ := createTestFile(t, "hello")
 
 	b := make([]byte, 2)
 	result, err := ReadBackwards(f, b)
@@ -88,7 +87,7 @@ func TestReadBackwards_CappedZeroRead(t *testing.T) {
 }
 
 func TestReadBackwards_EntirelyOutOfBounds(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 0, io.SeekEnd)
+	f, _ := createTestFile(t, "hello", 0, io.SeekEnd)
 
 	// This should overwrite the file without f knowing about it.
 	assert.NoError(t, os.WriteFile(f.Name(), []byte("ya"), 0644))
@@ -105,7 +104,7 @@ func TestReadBackwards_EntirelyOutOfBounds(t *testing.T) {
 }
 
 func TestReadBackwards_ExactlyOutOfBounds(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 0, io.SeekEnd)
+	f, _ := createTestFile(t, "hello", 0, io.SeekEnd)
 
 	// This should overwrite the file without f knowing about it.
 	assert.NoError(t, os.WriteFile(f.Name(), []byte("ya"), 0644))
@@ -119,7 +118,7 @@ func TestReadBackwards_ExactlyOutOfBounds(t *testing.T) {
 }
 
 func TestReadBackwards_PartiallyOutOfBounds(t *testing.T) {
-	f, _ := utils.CreateTestFile(t, "hello", 0, io.SeekEnd)
+	f, _ := createTestFile(t, "hello", 0, io.SeekEnd)
 
 	// This should overwrite the file without f knowing about it.
 	assert.NoError(t, os.WriteFile(f.Name(), []byte("ya"), 0644))

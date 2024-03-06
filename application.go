@@ -56,6 +56,7 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 	defer quit()
 
 	a.width, a.height = screen.Size()
+	a.screen = screen
 
 	buffer, err := NewBuffer(a.width, a.height, a.followMode, a.inputReader, ctx)
 	if err != nil {
@@ -73,24 +74,34 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 	}
 
 	screen.Clear()
-	screen.SetContent(0, 0, 'H', nil, tcell.StyleDefault)
-	screen.SetContent(1, 0, 'i', nil, tcell.StyleDefault)
 
 	go func() {
+		defer cancelCtx()
+
+		eventsCh := make(chan tcell.Event)
+		quitCh := make(chan struct{})
+
+		go screen.ChannelEvents(eventsCh, quitCh)
+
 		for {
 			// Update screen
 			screen.Show()
 
-			// Poll event
-			ev := screen.PollEvent()
+			// Get next event.
+			ev := <-eventsCh
+			if ev == nil {
+				return
+			}
 
 			// Process event
 			switch ev := ev.(type) {
 			case *tcell.EventResize:
 				screen.Sync()
 			case *tcell.EventKey:
-				if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
-					cancelCtx()
+				if ev.Key() == tcell.KeyEnter {
+					a.RenderLogLines(a.buffer.records.GetLinesToRender(a.height))
+				} else if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
+					close(quitCh)
 					return
 				}
 			}
@@ -99,4 +110,31 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func (a *Application) RenderLogLines(lines []string) {
+	var x, y int
+	y = 0
+	var state *stepState
+	for _, line := range lines {
+		x = 0
+		state = nil
+		for len(line) > 0 {
+			var ch string
+			ch, line, state = step(line, state)
+			w := state.Width()
+
+			for offset := w - 1; offset >= 0; offset-- {
+				runes := []rune(ch)
+				if offset == 0 {
+					a.screen.SetContent(offset+x, y, runes[0], runes[1:], tcell.StyleDefault)
+				} else {
+					a.screen.SetContent(offset+x, y, ' ', nil, tcell.StyleDefault)
+				}
+			}
+
+			x += w
+		}
+		y++
+	}
 }

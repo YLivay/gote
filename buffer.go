@@ -284,7 +284,7 @@ func (b *Buffer) seekAndOrient(pos int64, whence int) error {
 	}
 
 	fwdScanner := bufio.NewScanner(b.fwdReader)
-	fwdScanner.Split(reader.ScanLines)
+	fwdScanner.Split(scanLinesEagerly)
 	fwdScanner.Buffer(make([]byte, 1024), 1024*1024)
 
 	b.bkdScanner = bkdScanner

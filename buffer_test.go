@@ -6,12 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/YLivay/gote/utils"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestThis(t *testing.T) {
-	file, _ := utils.CreateTestFile(t, "0123456789abcdef\nghijklmnopqrstuv\nwxyz\n")
+	file, _ := createTestFile(t, "0123456789abcdef\nghijklmnopqrstuv\nwxyz\n")
 
 	buffer, err := NewBuffer(10, 10, false, file, context.Background())
 	assert.NoError(t, err)
