@@ -8,10 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"time"
 
 	"github.com/YLivay/gote/log"
-	"github.com/gdamore/tcell/v2"
 )
 
 func main() {
@@ -37,109 +35,77 @@ func run() error {
 	}
 	defer cleanupReader()
 
-	screen, err := tcell.NewScreen()
-	if err != nil {
-		return fmt.Errorf("failed to create terminal screen: %w", err)
-	}
-	if err := screen.Init(); err != nil {
-		return fmt.Errorf("failed to initialize terminal screen: %w", err)
-	}
+	application := NewApplication(reader, true)
 
-	quit := func() {
-		// You have to catch panics in a defer, clean up, and
-		// re-raise them - otherwise your application can
-		// die without leaving any diagnostic trace.
-		maybePanic := recover()
-		screen.Fini()
-		if maybePanic != nil {
-			panic(maybePanic)
-		}
-	}
-	defer quit()
+	application.Run(ctx, cancelCtx)
 
-	width, height := screen.Size()
-	application, err := NewApplication(width, height, true, reader)
-	if err != nil {
-		return fmt.Errorf("failed to create application: %w", err)
-	}
+	// go func() {
+	// 	for {
+	// 		// Update screen
+	// 		screen.Show()
 
-	if err := application.buffer.SeekAndPopulate(0); err != nil {
-		return fmt.Errorf("failed to populate the application buffer: %w", err)
-	}
+	// 		// Poll event
+	// 		ev := screen.PollEvent()
 
-	screen.Clear()
-	screen.SetContent(0, 0, 'H', nil, tcell.StyleDefault)
-	screen.SetContent(1, 0, 'e', nil, tcell.StyleDefault)
-	screen.SetContent(2, 0, 'l', nil, tcell.StyleDefault)
-	screen.SetContent(3, 0, 'l', nil, tcell.StyleDefault)
-	screen.SetContent(4, 0, 'o', nil, tcell.StyleDefault)
+	// 		// Process event
+	// 		switch ev := ev.(type) {
+	// 		case *tcell.EventResize:
+	// 			screen.Sync()
+	// 		case *tcell.EventKey:
+	// 			if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
+	// 				cancelCtx()
+	// 				return
+	// 			}
+	// 		}
+	// 	}
+	// }()
 
-	go func() {
-		for {
-			// Update screen
-			screen.Show()
+	// <-ctx.Done()
 
-			// Poll event
-			ev := screen.PollEvent()
+	// // Check if os.Stdin is a tty. If it isn't, we need to initialize a new one for user input.
+	// tty, cleanupTty, err := ensureTty()
+	// if err != nil {
+	// 	return errors.New("Failed to ensure tty: " + err.Error())
+	// }
+	// defer cleanupTty()
 
-			// Process event
-			switch ev := ev.(type) {
-			case *tcell.EventResize:
-				screen.Sync()
-			case *tcell.EventKey:
-				if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
-					cancelCtx()
-				}
-			}
-		}
-	}()
+	// go func() {
+	// 	// Read keys from the tty and send them to the program
+	// 	for {
+	// 		r, err := tty.ReadRune()
+	// 		if err != nil {
+	// 			log.Println("Failed to read from /dev/tty:", err)
+	// 			return
+	// 		}
+	// 		log.Println("Read rune:", r, string(r))
 
-	<-ctx.Done()
+	// 		switch r {
+	// 		case 'q':
+	// 			cancelCtx()
+	// 			return
+	// 		}
+	// 	}
+	// }()
 
-	// Check if os.Stdin is a tty. If it isn't, we need to initialize a new one for user input.
-	tty, cleanupTty, err := ensureTty()
-	if err != nil {
-		return errors.New("Failed to ensure tty: " + err.Error())
-	}
-	defer cleanupTty()
+	// // p := tea.NewProgram(AppState{reader: reader}, tea.WithContext(ctx))
+	// // if _, err := p.Run(); err != nil {
+	// // 	log.Fatalln(err.Error())
+	// // }
 
-	go func() {
-		// Read keys from the tty and send them to the program
-		for {
-			r, err := tty.ReadRune()
-			if err != nil {
-				log.Println("Failed to read from /dev/tty:", err)
-				return
-			}
-			log.Println("Read rune:", r, string(r))
-
-			switch r {
-			case 'q':
-				cancelCtx()
-				return
-			}
-		}
-	}()
-
-	// p := tea.NewProgram(AppState{reader: reader}, tea.WithContext(ctx))
-	// if _, err := p.Run(); err != nil {
-	// 	log.Fatalln(err.Error())
+	// // Sleep for a bit
+	// select {
+	// case <-time.After(30 * time.Second):
+	// case <-ctx.Done():
+	// 	log.Println("Sleep interrupted")
 	// }
 
-	// Sleep for a bit
-	select {
-	case <-time.After(30 * time.Second):
-	case <-ctx.Done():
-		log.Println("Sleep interrupted")
-	}
-
-	b := make([]byte, 10)
-	reader.Seek(0, io.SeekStart)
-	_, err = reader.Read(b)
-	if err != nil {
-		log.Println("Failed to read file:", err)
-	}
-	log.Println(string(b))
+	// b := make([]byte, 10)
+	// reader.Seek(0, io.SeekStart)
+	// _, err = reader.Read(b)
+	// if err != nil {
+	// 	log.Println("Failed to read file:", err)
+	// }
+	// log.Println(string(b))
 	return nil
 }
 

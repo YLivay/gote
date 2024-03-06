@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sync"
+	"time"
 
+	"github.com/YLivay/gote/log"
 	"github.com/YLivay/gote/reader"
 )
 
@@ -23,6 +26,9 @@ type Buffer struct {
 
 	// Mutex to serialize operations.
 	mu *sync.Mutex
+	// The context for this buffer. when it finishes (or canceled) a best effort
+	// is done to close and free resources.
+	ctx context.Context
 
 	// A reader for reading forwards in the file. This reader is rarely expected
 	// to perform seek operations.
@@ -47,9 +53,15 @@ type Buffer struct {
 
 	// The managed list of records loaded by this buffer's scanners.
 	records *bufferRecordList
+
+	// A cancel function to stop the current record population process. This
+	// will be called whenever the population should reevaluate what it needs to
+	// populate, etc after resizing the buffer, or changing the buffer's eager
+	// settings.
+	cancelPopulate context.CancelCauseFunc
 }
 
-func NewBuffer(width, height int, followMode bool, inputReader *os.File) (*Buffer, error) {
+func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx context.Context) (*Buffer, error) {
 	inputFname := inputReader.Name()
 
 	fwdReader := inputReader
@@ -59,25 +71,62 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File) (*Buffe
 		return nil, err
 	}
 
-	return &Buffer{
-		mu:         &sync.Mutex{},
-		width:      width,
-		height:     height,
-		followMode: followMode,
-		fwdReader:  fwdReader,
-		bkdReader:  bkdReader,
-		records:    NewBufferRecordList(),
-	}, nil
+	buffer := &Buffer{
+		mu:             &sync.Mutex{},
+		ctx:            ctx,
+		width:          width,
+		height:         height,
+		followMode:     followMode,
+		fwdReader:      fwdReader,
+		bkdReader:      bkdReader,
+		records:        NewBufferRecordList(),
+		cancelPopulate: func(err error) {},
+	}
+
+	go buffer.setupAsyncReads(nil, true)
+
+	return buffer, nil
+}
+
+func (b *Buffer) ResizeScreen(width, height int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.width = width
+	b.height = height
+
+	// TODO: rewrap records lines and possibly update the records screen top.
+
+	b.setupAsyncReads(errors.New("screen size changed"), false)
+}
+
+func (b *Buffer) SetFollowMode(followMode bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.followMode = followMode
+	b.setupAsyncReads(errors.New("follow mode changed"), false)
+}
+
+func (b *Buffer) SetEagerness(fwdEager, bkdEager int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.fwdEager = fwdEager
+	b.bkdEager = bkdEager
+	b.setupAsyncReads(errors.New("eagerness settings changed"), false)
 }
 
 // SeekAndPopulate seeks to the given position and populates the buffer with records.
-func (b *Buffer) SeekAndPopulate(pos int64) error {
-	if err := b.seekAndOrient(pos); err != nil {
-		return fmt.Errorf("failed to orient buffer: %w", err)
-	}
-
+func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	b.cancelPopulate(errors.New("changing seek position"))
+
+	if err := b.seekAndOrient(pos, whence); err != nil {
+		return fmt.Errorf("failed to orient buffer: %w", err)
+	}
 
 	b.records.WithLock(func(records *bufferRecordList) any {
 		records.Clear()
@@ -85,42 +134,118 @@ func (b *Buffer) SeekAndPopulate(pos int64) error {
 		return true
 	})
 
-	b.something()
+	b.setupAsyncReads(errors.New("changing seek position"), false)
 
 	return nil
 }
 
-func (b *Buffer) something() error {
-	// TODO: move these to an async goroutine.
-	for i := 0; i < b.bkdToRead; i++ {
-		line, pos, err := b.bkdScanner.ReadLine()
-		if err != nil && !errors.Is(err, io.EOF) {
-			return fmt.Errorf("failed to populate buffer (backwards read): %w", err)
-		}
+func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Context {
+	// In a loop, wait for something to wake you up to try and read more stuff.
+	populateCtx, cancelPopulate := context.WithCancelCause(b.ctx)
+	context.AfterFunc(populateCtx, func() {
+		reason := populateCtx.Err()
+		log.Println(reason)
+	})
 
-		b.records.Prepend(newRecord(pos, line, b.width))
-		if errors.Is(err, io.EOF) {
-			break
-		}
+	// get local references to stuff within a lock to make them consistent
+	// in relation to each other.
+	if withLocks {
+		b.mu.Lock()
+	}
+	b.cancelPopulate(restartReason)
+	bkdToRead, fwdToRead := b.bkdToRead, b.fwdToRead
+	bkdScanner, fwdScanner := b.bkdScanner, b.fwdScanner
+	width, height := b.width, b.height
+	followMode := b.followMode
+	b.cancelPopulate = cancelPopulate
+	if withLocks {
+		b.mu.Unlock()
 	}
 
-	for i := 0; i < b.fwdToRead; i++ {
-		if !b.fwdScanner.Scan() {
-			if err := b.fwdScanner.Err(); err != nil {
-				return fmt.Errorf("failed to populate buffer (forwards read): %w", err)
+	go func() {
+		for i := 0; i < bkdToRead; i++ {
+			if populateCtx.Err() != nil {
+				return
 			}
 
-			break
+			line, pos, err := bkdScanner.ReadLine()
+			if err != nil && !errors.Is(err, io.EOF) {
+				b.setupAsyncReads(fmt.Errorf("failed to populate buffer (backwards read): %w", err), true)
+				return
+			}
+
+			b.mu.Lock()
+			if populateCtx.Err() != nil {
+				b.mu.Unlock()
+				return
+			}
+			b.records.WithLock(func(records *bufferRecordList) any {
+				r := newRecord(pos, line, width)
+				records.Prepend(r)
+
+				// If prepending but we don't have a full screen of lines yet,
+				// we should scroll up to try and fit more lines on screen.
+				_, onScreen, _ := records.CalcScreenLines(height)
+				canScroll := min(height-onScreen, len(r.lines))
+				if canScroll > 0 {
+					records.ScrollUp(canScroll)
+				}
+
+				return true
+			})
+			b.mu.Unlock()
+
+			if errors.Is(err, io.EOF) {
+				break
+			}
 		}
+	}()
 
-		line := b.fwdScanner.Bytes()
-		b.records.Append(newRecord(-1, line, b.width))
-	}
+	go func() {
+		for i := 0; i < fwdToRead || followMode; i++ {
+			if populateCtx.Err() != nil {
+				return
+			}
 
-	// b.populateBufferTop()
-	// b.populateBufferBottom()
+			if !fwdScanner.Scan() {
+				if err := fwdScanner.Err(); err != nil {
+					b.setupAsyncReads(fmt.Errorf("failed to populate buffer (forwards read): %w", err), true)
+					return
+				}
 
-	return nil
+				if followMode {
+					// If EOF, but we're in follow mode, wait a bit and try
+					// reading the file again.
+					<-time.After(10 * time.Millisecond)
+					continue
+				} else {
+					// If EOF and we're not in follow mode, stop. we have
+					// all the data we wanted.
+					return
+				}
+			}
+
+			b.mu.Lock()
+			if populateCtx.Err() != nil {
+				b.mu.Unlock()
+				return
+			}
+
+			line := fwdScanner.Bytes()
+			record := newRecord(-1, line, width)
+
+			b.records.WithLock(func(records *bufferRecordList) any {
+				records.Append(record)
+				if followMode {
+					records.ScrollToBottom(height)
+				}
+				return true
+			})
+			b.mu.Unlock()
+		}
+	}()
+
+	return populateCtx
 }
 
 // seekAndOrient seeks to a given position and "orients" the buffer. The
@@ -129,10 +254,9 @@ func (b *Buffer) something() error {
 // orientation is done by scanning backwards until an end of line is found or
 // the start of the file is reached. That new position is where the forwards and
 // backwards readers will start reading from.
-func (b *Buffer) seekAndOrient(pos int64) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
+//
+// This function is not concurrency safe.
+func (b *Buffer) seekAndOrient(pos int64, whence int) error {
 	// Cleanup old backwards scanner if it exists.
 	if b.bkdScanner != nil {
 		if err := b.bkdScanner.Close(); err != nil {
@@ -140,7 +264,7 @@ func (b *Buffer) seekAndOrient(pos int64) error {
 		}
 	}
 
-	bkdScanner, err := reader.NewBackwardsLineScanner(b.bkdReader, 1024, pos)
+	bkdScanner, err := reader.NewBackwardsLineScanner(b.bkdReader, 1024, pos, int64(whence))
 	if err != nil {
 		return err
 	}
@@ -174,7 +298,7 @@ func (b *Buffer) seekAndOrient(pos int64) error {
 // and the buffer's eagerness. Note: this returns number of lines, not records.
 func (b *Buffer) calcLinesToReadUsingRecords(records *bufferRecordList) (bkdLines, fwdLines int) {
 	// Figure out how many lines we have above, below and on the screen.
-	aboveScreen, onScreen, belowScreen := b.calcScreenLines(records)
+	aboveScreen, onScreen, belowScreen := records.CalcScreenLines(b.height)
 
 	return b.calcLinesToReadUsingAvailableLines(aboveScreen, onScreen, belowScreen)
 }
@@ -196,32 +320,11 @@ func (b *Buffer) calcLinesToReadUsingAvailableLines(aboveScreen, onScreen, below
 	return
 }
 
-// calcScreenLines figures out how many lines the buffer currently has loaded
-// and how many are displayed above, below and on the screen.
-func (b *Buffer) calcScreenLines(records *bufferRecordList) (aboveScreen, onScreen, belowScreen int) {
-	screenTop := records.screenTop
-	if screenTop == nil {
-		return 0, 0, 0
-	}
-
-	aboveScreen += records.screenTopOffset
-	for r := screenTop.prev; r != nil; r = r.prev {
-		aboveScreen += len(r.record.lines)
-	}
-	belowScreen += len(screenTop.record.lines) - records.screenTopOffset
-	for r := screenTop.next; r != nil; r = r.next {
-		belowScreen += len(r.record.lines)
-	}
-	onScreen = min(belowScreen, b.height)
-	belowScreen -= onScreen
-	return
-}
-
 // prune prunes the buffer to the desired size.
 func (b *Buffer) prune() (int, int) {
 	result := b.records.WithLock(func(records *bufferRecordList) any {
 		prunedBack, prunedFwd := 0, 0
-		hasAbove, hasOnScreen, hasBelow := b.calcScreenLines(records)
+		hasAbove, hasOnScreen, hasBelow := records.CalcScreenLines(b.height)
 		wantsAbove, wantsBelow := b.calcLinesToReadUsingAvailableLines(hasAbove, hasOnScreen, hasBelow)
 
 		// Prune the buffer to the desired size.

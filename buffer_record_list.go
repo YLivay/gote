@@ -265,6 +265,45 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 	}
 }
 
+// ScrollToBottom attempts to move the screen top to the bottom of the list
+// leaving the given height of lines on the screen.
+func (l *bufferRecordList) ScrollToBottom(height int) {
+	l.WithLock(func(records *bufferRecordList) any {
+		records.screenTop = records.tail
+		records.screenTopOffset = len(records.tail.record.lines) - 1
+		records.ScrollUp(height)
+		return true
+	})
+}
+
+// CalcScreenLines calculates how many of the record's lines are above, on, and
+// below the screen, given the screen's height.
+//
+// If the records list is empty, this function returns 0 for all three values.
+func (l *bufferRecordList) CalcScreenLines(screenHeight int) (aboveScreen, onScreen, belowScreen int) {
+	if !l.withinLock {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+	}
+
+	screenTop := l.screenTop
+	if screenTop == nil {
+		return 0, 0, 0
+	}
+
+	aboveScreen += l.screenTopOffset
+	for r := screenTop.prev; r != nil; r = r.prev {
+		aboveScreen += len(r.record.lines)
+	}
+	belowScreen += len(screenTop.record.lines) - l.screenTopOffset
+	for r := screenTop.next; r != nil; r = r.next {
+		belowScreen += len(r.record.lines)
+	}
+	onScreen = min(belowScreen, screenHeight)
+	belowScreen -= onScreen
+	return
+}
+
 // GetLinesToRender returns the lines to render on the screen starting from screen top and screen top offset.
 func (l *bufferRecordList) GetLinesToRender(lineCount int) []string {
 	if !l.withinLock {

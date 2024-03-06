@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/YLivay/gote/utils"
 	"github.com/stretchr/testify/assert"
@@ -10,14 +13,14 @@ import (
 func TestThis(t *testing.T) {
 	file, _ := utils.CreateTestFile(t, "0123456789abcdef\nghijklmnopqrstuv\nwxyz\n")
 
-	application, err := NewApplication(10, 10, false, file)
+	buffer, err := NewBuffer(10, 10, false, file, context.Background())
 	assert.NoError(t, err)
 
-	buffer := application.buffer
-	buffer.bkdEager = 10
-	buffer.fwdEager = 10
-	err = buffer.SeekAndPopulate(17)
+	buffer.SetEagerness(10, 10)
+	err = buffer.SeekAndPopulate(17, io.SeekStart)
 	assert.NoError(t, err)
+
+	<-time.After(20 * time.Millisecond)
 
 	lines := buffer.records.GetLinesToRender(10)
 	assert.EqualValues(t, []string{"hello", "hi"}, lines)
