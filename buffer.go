@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/YLivay/gote/log"
 	"github.com/YLivay/gote/reader"
+	"github.com/gdamore/tcell/v2"
 )
 
 type Buffer struct {
@@ -34,7 +34,7 @@ type Buffer struct {
 	// to perform seek operations.
 	fwdReader *os.File
 	// A scanner that reads forwards from fwdReader line by line.
-	fwdScanner *bufio.Scanner
+	fwdScanner *reader.ForwardsLineScanner
 	// A reader for reading backwards in the file. This reader needs to do
 	// nearly as much seeks as it does reads.
 	bkdReader *os.File
@@ -54,6 +54,10 @@ type Buffer struct {
 	// The managed list of records loaded by this buffer's scanners.
 	records *bufferRecordList
 
+	// A callback to invoke when an event is received. It will be posted to the
+	// application screen.
+	postEvent func(tcell.Event) error
+
 	// A cancel function to stop the current record population process. This
 	// will be called whenever the population should reevaluate what it needs to
 	// populate, etc after resizing the buffer, or changing the buffer's eager
@@ -72,14 +76,17 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 	}
 
 	buffer := &Buffer{
-		mu:             &sync.Mutex{},
-		ctx:            ctx,
-		width:          width,
-		height:         height,
-		followMode:     followMode,
-		fwdReader:      fwdReader,
-		bkdReader:      bkdReader,
-		records:        NewBufferRecordList(),
+		mu:         &sync.Mutex{},
+		ctx:        ctx,
+		width:      width,
+		height:     height,
+		followMode: followMode,
+		fwdReader:  fwdReader,
+		bkdReader:  bkdReader,
+		records:    NewBufferRecordList(),
+		postEvent: func(e tcell.Event) error {
+			return nil
+		},
 		cancelPopulate: func(err error) {},
 	}
 
@@ -117,7 +124,16 @@ func (b *Buffer) SetEagerness(fwdEager, bkdEager int) {
 	b.setupAsyncReads(errors.New("eagerness settings changed"), false)
 }
 
-// SeekAndPopulate seeks to the given position and populates the buffer with records.
+func (b *Buffer) SetPostEventFunc(postEvent func(tcell.Event) error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.postEvent = postEvent
+}
+
+// SeekAndPopulate seeks to the given position and populates the buffer with
+// records. It also starts asynchronous reads to keep the buffer populated as
+// you move around.
 func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -193,6 +209,7 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 
 				return true
 			})
+			b.postEvent(tcell.NewEventInterrupt(nil))
 			b.mu.Unlock()
 
 			if errors.Is(err, io.EOF) {
@@ -241,6 +258,7 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				}
 				return true
 			})
+			b.postEvent(tcell.NewEventInterrupt(nil))
 			b.mu.Unlock()
 		}
 	}()
@@ -283,8 +301,7 @@ func (b *Buffer) seekAndOrient(pos int64, whence int) error {
 		return err
 	}
 
-	fwdScanner := bufio.NewScanner(b.fwdReader)
-	fwdScanner.Split(scanLinesEagerly)
+	fwdScanner := reader.NewForwardsLineScanner(b.fwdReader)
 	fwdScanner.Buffer(make([]byte, 1024), 1024*1024)
 
 	b.bkdScanner = bkdScanner
@@ -307,11 +324,10 @@ func (b *Buffer) calcLinesToReadUsingRecords(records *bufferRecordList) (bkdLine
 // should read above or below its current positions. This considers the buffer's
 // eagerness. Note: this returns number of lines, not records.
 func (b *Buffer) calcLinesToReadUsingAvailableLines(aboveScreen, onScreen, belowScreen int) (bkdLines, fwdLines int) {
-	bkdLines = max(b.bkdEager-aboveScreen, 0)
+	bkdLines = max(b.bkdEager-aboveScreen, b.height-onScreen)
 	if b.followMode {
-		// In follow mode we are interested in reading all available input as fast
-		// as possible below the screen.
-		fwdLines = 10000
+		// In follow mode it doesnt matter how many lines we return in fwdLines. We will always try reading more.
+		fwdLines = 0
 	} else {
 		// In non-follow mode we are interested in reading ahead of both the top and
 		// bottom of the screen.

@@ -81,6 +81,10 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 		eventsCh := make(chan tcell.Event)
 		quitCh := make(chan struct{})
 
+		buffer.SetPostEventFunc(func(ev tcell.Event) error {
+			return screen.PostEvent(ev)
+		})
+
 		go screen.ChannelEvents(eventsCh, quitCh)
 
 		for {
@@ -104,6 +108,8 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 					close(quitCh)
 					return
 				}
+			case *tcell.EventInterrupt:
+				a.RenderLogLines(a.buffer.records.GetLinesToRender(a.height))
 			}
 		}
 	}()
@@ -127,9 +133,9 @@ func (a *Application) RenderLogLines(lines []string) {
 			for offset := w - 1; offset >= 0; offset-- {
 				runes := []rune(ch)
 				if offset == 0 {
-					a.screen.SetContent(offset+x, y, runes[0], runes[1:], tcell.StyleDefault)
+					a.screen.SetContent(x+offset, y, runes[0], runes[1:], tcell.StyleDefault)
 				} else {
-					a.screen.SetContent(offset+x, y, ' ', nil, tcell.StyleDefault)
+					a.screen.SetContent(x+offset, y, ' ', nil, tcell.StyleDefault)
 				}
 			}
 

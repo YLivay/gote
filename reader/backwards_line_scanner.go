@@ -68,6 +68,11 @@ func (s *BackwardsLineScanner) Close() error {
 	return nil
 }
 
+// ReadLine reads the next line from the file, starting from the current
+// position. It returns the line, the position in the file where the line
+// starts, and an error if any occured. If the end of the file is reached, the
+// error will be io.EOF. If a non io.EOF error has occured, no line data will be
+// returned and the position will be -1.
 func (s *BackwardsLineScanner) ReadLine() ([]byte, int64, error) {
 	var err error
 
@@ -125,7 +130,7 @@ func (s *BackwardsLineScanner) ReadLine() ([]byte, int64, error) {
 		// Cleanup to prep for the next read.
 		s.chunks = make([]*readChunk, 0)
 
-		if nlIdx >= 0 {
+		if nlIdx != -1 {
 			// We need to save the bytes before the new line in curChunk.buf. These are
 			// the end of the NEXT line we'll be reading.
 			var remainingChunk *readChunk

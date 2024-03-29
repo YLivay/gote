@@ -59,3 +59,16 @@ func createTestFile(t *testing.T, contents string, seekStuff ...int) (*os.File, 
 
 	return f, pos
 }
+
+func appendToTestFile(t *testing.T, f *os.File, contents string) {
+	f2, err := os.OpenFile(f.Name(), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if _, err = f2.WriteString(contents); err != nil {
+		t.Fatal(err.Error())
+	}
+	if err = f2.Close(); err != nil {
+		t.Fatal(err.Error())
+	}
+}
