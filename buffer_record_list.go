@@ -13,6 +13,13 @@ type bufferRecordList struct {
 	// line within the record to render at the top of the screen.
 	screenTopOffset int
 
+	// Number of lines above the screen top, not including the screen top itself.
+	linesAboveScreenTop int
+	// Number of lines below the screen top, including the screen top itself.
+	linesBelowScreenTop int
+	// Total number of lines the records in the list span.
+	linesTotal int
+
 	// If true, we're within a WithLock call. This will prevent the other
 	// functions from attempting to lock the mutex.
 	withinLock bool
@@ -42,15 +49,24 @@ func (l *bufferRecordList) WithLock(f func(*bufferRecordList) any) any {
 
 	// Construct a new instance that will not perform locks.
 	unlockedInst := &bufferRecordList{
-		head:            l.head,
-		tail:            l.tail,
-		screenTop:       l.screenTop,
-		screenTopOffset: l.screenTopOffset,
-		withinLock:      true,
+		head:                l.head,
+		tail:                l.tail,
+		screenTop:           l.screenTop,
+		screenTopOffset:     l.screenTopOffset,
+		linesAboveScreenTop: l.linesAboveScreenTop,
+		linesBelowScreenTop: l.linesBelowScreenTop,
+		linesTotal:          l.linesTotal,
+		withinLock:          true,
 	}
 	defer func() {
 		// Assign back to the original instance.
-		l.head, l.tail, l.screenTop, l.screenTopOffset = unlockedInst.head, unlockedInst.tail, unlockedInst.screenTop, unlockedInst.screenTopOffset
+		l.head = unlockedInst.head
+		l.tail = unlockedInst.tail
+		l.screenTop = unlockedInst.screenTop
+		l.screenTopOffset = unlockedInst.screenTopOffset
+		l.linesAboveScreenTop = unlockedInst.linesAboveScreenTop
+		l.linesBelowScreenTop = unlockedInst.linesBelowScreenTop
+		l.linesTotal = unlockedInst.linesTotal
 	}()
 
 	return f(unlockedInst)
@@ -77,6 +93,10 @@ func (l *bufferRecordList) Append(r *record) {
 		l.screenTop = newRecord
 		l.screenTopOffset = 0
 	}
+
+	numLines := len(r.lines)
+	l.linesBelowScreenTop += numLines
+	l.linesTotal += numLines
 }
 
 // Prepend adds a record to the end of the list.
@@ -100,6 +120,10 @@ func (l *bufferRecordList) Prepend(r *record) {
 		l.screenTop = newRecord
 		l.screenTopOffset = 0
 	}
+
+	numLines := len(r.lines)
+	l.linesAboveScreenTop += numLines
+	l.linesTotal += numLines
 }
 
 // PopFirst removes the first record from the list and returns it.
@@ -124,13 +148,20 @@ func (l *bufferRecordList) PopFirst() *record {
 		l.tail = nil
 		l.screenTop = nil
 		l.screenTopOffset = 0
+		l.linesAboveScreenTop = 0
+		l.linesBelowScreenTop = 0
 	} else {
 		if l.screenTop == head {
+			l.linesAboveScreenTop -= l.screenTopOffset
 			l.screenTop = next
 			l.screenTopOffset = 0
+		} else {
+			l.linesAboveScreenTop -= len(head.record.lines)
 		}
 		next.prev = nil
 	}
+
+	l.linesTotal -= len(head.record.lines)
 
 	return head.record
 }
@@ -157,13 +188,20 @@ func (l *bufferRecordList) PopLast() *record {
 		l.head = nil
 		l.screenTop = nil
 		l.screenTopOffset = 0
+		l.linesAboveScreenTop = 0
+		l.linesBelowScreenTop = 0
 	} else {
 		if l.screenTop == tail {
+			l.linesBelowScreenTop -= len(tail.record.lines) - l.screenTopOffset
 			l.screenTop = prev
 			l.screenTopOffset = 0
+		} else {
+			l.linesBelowScreenTop -= len(tail.record.lines)
 		}
 		prev.next = nil
 	}
+
+	l.linesTotal -= len(tail.record.lines)
 
 	return tail.record
 }
@@ -180,6 +218,9 @@ func (l *bufferRecordList) Clear() {
 	l.tail = nil
 	l.screenTop = nil
 	l.screenTopOffset = 0
+	l.linesAboveScreenTop = 0
+	l.linesBelowScreenTop = 0
+	l.linesTotal = 0
 }
 
 // ScrollUp attempts to move the screen top up by the given number of lines.
@@ -193,7 +234,7 @@ func (l *bufferRecordList) ScrollUp(lines int) int {
 
 	linesMoved := 0
 	if l.screenTop == nil {
-		return linesMoved
+		return 0
 	}
 
 	nextScreenTop := l.screenTop
@@ -202,6 +243,8 @@ func (l *bufferRecordList) ScrollUp(lines int) int {
 			linesMoved += lines
 			l.screenTopOffset -= lines
 			l.screenTop = nextScreenTop
+			l.linesAboveScreenTop -= linesMoved
+			l.linesBelowScreenTop += linesMoved
 			return linesMoved
 		}
 
@@ -213,6 +256,8 @@ func (l *bufferRecordList) ScrollUp(lines int) int {
 
 		if nextScreenTop.prev == nil {
 			l.screenTop = nextScreenTop
+			l.linesAboveScreenTop -= linesMoved
+			l.linesBelowScreenTop += linesMoved
 			return linesMoved
 		}
 
@@ -234,7 +279,7 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 
 	linesMoved := 0
 	if l.screenTop == nil {
-		return linesMoved
+		return 0
 	}
 
 	nextScreenTop := l.screenTop
@@ -244,6 +289,8 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 			linesMoved += lines
 			l.screenTopOffset += lines
 			l.screenTop = nextScreenTop
+			l.linesAboveScreenTop += linesMoved
+			l.linesBelowScreenTop -= linesMoved
 			return linesMoved
 		}
 
@@ -255,6 +302,8 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 
 		if nextScreenTop.next == nil {
 			l.screenTop = nextScreenTop
+			l.linesAboveScreenTop += linesMoved
+			l.linesBelowScreenTop -= linesMoved
 			return linesMoved
 		}
 
@@ -271,6 +320,8 @@ func (l *bufferRecordList) ScrollToBottom(height int) {
 	l.WithLock(func(records *bufferRecordList) any {
 		records.screenTop = records.tail
 		records.screenTopOffset = len(records.tail.record.lines) - 1
+		records.linesBelowScreenTop = 1
+		records.linesAboveScreenTop = records.linesTotal - 1
 		records.ScrollUp(height)
 		return true
 	})
@@ -286,21 +337,14 @@ func (l *bufferRecordList) CalcScreenLines(screenHeight int) (aboveScreen, onScr
 		defer l.mu.Unlock()
 	}
 
-	screenTop := l.screenTop
-	if screenTop == nil {
-		return 0, 0, 0
+	aboveScreen = l.linesAboveScreenTop
+	if l.linesBelowScreenTop <= screenHeight {
+		onScreen = l.linesBelowScreenTop
+		belowScreen = 0
+	} else {
+		onScreen = screenHeight
+		belowScreen = l.linesBelowScreenTop - screenHeight
 	}
-
-	aboveScreen += l.screenTopOffset
-	for r := screenTop.prev; r != nil; r = r.prev {
-		aboveScreen += len(r.record.lines)
-	}
-	belowScreen += len(screenTop.record.lines) - l.screenTopOffset
-	for r := screenTop.next; r != nil; r = r.next {
-		belowScreen += len(r.record.lines)
-	}
-	onScreen = min(belowScreen, screenHeight)
-	belowScreen -= onScreen
 	return
 }
 
