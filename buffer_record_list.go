@@ -318,10 +318,11 @@ func (l *bufferRecordList) GetLinesToRender(lineCount int) []string {
 		takeLines := len(record.record.lines) - offset
 		if takeLines >= lineCount {
 			result = append(result, record.record.lines[offset:offset+lineCount]...)
+			offset = 0
 			break
 		}
 
-		result = append(result, record.record.lines[:takeLines]...)
+		result = append(result, record.record.lines[offset:]...)
 		lineCount -= takeLines
 		offset = 0
 	}

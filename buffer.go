@@ -195,6 +195,16 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				b.mu.Unlock()
 				return
 			}
+
+			// When EOF is returned with an empty line it doesnt necessarily
+			// mean that an empty line exists at the start of the file. More
+			// likely it means we didn't read anything, so avoid adding this
+			// line to the buffer.
+			if len(line) == 0 && errors.Is(err, io.EOF) {
+				b.mu.Unlock()
+				return
+			}
+
 			b.records.WithLock(func(records *bufferRecordList) any {
 				r := newRecord(pos, line, width)
 				records.Prepend(r)

@@ -35,7 +35,7 @@ func run() error {
 	}
 	defer cleanupReader()
 
-	application := NewApplication(reader, true)
+	application := NewApplication(reader, false)
 	if err = application.Run(ctx, cancelCtx); err != nil && err != context.Canceled {
 		return fmt.Errorf("failed to run application: %w", err)
 	}

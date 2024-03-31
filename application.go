@@ -102,13 +102,36 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 			case *tcell.EventResize:
 				screen.Sync()
 			case *tcell.EventKey:
-				if ev.Key() == tcell.KeyEnter {
-					a.RenderLogLines(a.buffer.records.GetLinesToRender(a.height))
-				} else if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC || ev.Rune() == 'q' {
+				needsRerender := false
+
+				if ev.Rune() == 'q' {
 					close(quitCh)
-					return
+				} else {
+					switch ev.Key() {
+					case tcell.KeyUp:
+						a.buffer.records.ScrollUp(1)
+						needsRerender = true
+					case tcell.KeyPgUp:
+						a.buffer.records.ScrollUp(a.height)
+						needsRerender = true
+					case tcell.KeyDown:
+						a.buffer.records.ScrollDown(1)
+						needsRerender = true
+					case tcell.KeyPgDn:
+						a.buffer.records.ScrollDown(a.height)
+						needsRerender = true
+					case tcell.KeyEscape:
+					case tcell.KeyCtrlC:
+						close(quitCh)
+					}
+				}
+
+				if needsRerender {
+					screen.Clear()
+					a.RenderLogLines(a.buffer.records.GetLinesToRender(a.height))
 				}
 			case *tcell.EventInterrupt:
+				screen.Clear()
 				a.RenderLogLines(a.buffer.records.GetLinesToRender(a.height))
 			}
 		}
