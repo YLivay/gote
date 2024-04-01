@@ -178,6 +178,17 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 		b.mu.Unlock()
 	}
 
+	// A function that wakes up whenever we need to read more lines in any direction.
+	// It wakes up on:
+	// - context cancellation
+	// - scrolling events
+	// - eagerness settings change
+	go func() {
+		select {
+		case <-populateCtx.Done():
+		}
+	}()
+
 	go func() {
 		for i := 0; i < bkdToRead; i++ {
 			if populateCtx.Err() != nil {
