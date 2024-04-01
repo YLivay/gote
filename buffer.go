@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/YLivay/gote/log"
 	"github.com/YLivay/gote/reader"
 	"github.com/gdamore/tcell/v2"
 )
@@ -58,11 +57,14 @@ type Buffer struct {
 	// application screen.
 	postEvent func(tcell.Event) error
 
+	// A mutex to serialize canceling the current populate process.
+	muCancelPopulate *sync.Mutex
+
 	// A cancel function to stop the current record population process. This
 	// will be called whenever the current async readers should be disposed. For
 	// example, this will be called before seeking and reorienting the buffer,
 	// or on reader errors.
-	cancelPopulate context.CancelCauseFunc
+	cancelPopulate func(err error) <-chan any
 }
 
 func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx context.Context) (*Buffer, error) {
@@ -87,42 +89,48 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 		postEvent: func(e tcell.Event) error {
 			return nil
 		},
-		cancelPopulate: func(err error) {},
+		muCancelPopulate: &sync.Mutex{},
+		cancelPopulate: func(err error) <-chan any {
+			ch := make(chan any)
+			close(ch)
+			return ch
+		},
 	}
 
-	go buffer.setupAsyncReads(nil, true)
+	buffer.setupAsyncReads(nil)
 
 	return buffer, nil
 }
 
-func (b *Buffer) ResizeScreen(width, height int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// TODO: too early for me to figure out how these should work.
+// func (b *Buffer) ResizeScreen(width, height int) {
+// 	b.mu.Lock()
+// 	defer b.mu.Unlock()
 
-	b.width = width
-	b.height = height
+// 	b.width = width
+// 	b.height = height
 
-	// TODO: rewrap records lines and possibly update the records screen top.
+// 	// TODO: rewrap records lines and possibly update the records screen top.
 
-	b.setupAsyncReads(errors.New("screen size changed"), false)
-}
+// 	b.setupAsyncReads(errors.New("screen size changed"), false)
+// }
 
-func (b *Buffer) SetFollowMode(followMode bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// func (b *Buffer) SetFollowMode(followMode bool) {
+// 	b.mu.Lock()
+// 	defer b.mu.Unlock()
 
-	b.followMode = followMode
-	b.setupAsyncReads(errors.New("follow mode changed"), false)
-}
+// 	b.followMode = followMode
+// 	b.setupAsyncReads(errors.New("follow mode changed"), false)
+// }
 
-func (b *Buffer) SetEagerness(fwdEager, bkdEager int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// func (b *Buffer) SetEagerness(fwdEager, bkdEager int) {
+// 	b.mu.Lock()
+// 	defer b.mu.Unlock()
 
-	b.fwdEager = fwdEager
-	b.bkdEager = bkdEager
-	b.setupAsyncReads(errors.New("eagerness settings changed"), false)
-}
+// 	b.fwdEager = fwdEager
+// 	b.bkdEager = bkdEager
+// 	b.setupAsyncReads(errors.New("eagerness settings changed"), false)
+// }
 
 func (b *Buffer) SetPostEventFunc(postEvent func(tcell.Event) error) {
 	b.mu.Lock()
@@ -136,11 +144,11 @@ func (b *Buffer) SetPostEventFunc(postEvent func(tcell.Event) error) {
 // you move around.
 func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
-	b.cancelPopulate(errors.New("changing seek position"))
+	<-b.cancelPopulate(errors.New("changing seek position"))
 
 	if err := b.seekAndOrient(pos, whence); err != nil {
+		b.mu.Unlock()
 		return fmt.Errorf("failed to orient buffer: %w", err)
 	}
 
@@ -150,65 +158,97 @@ func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 		return true
 	})
 
-	b.setupAsyncReads(errors.New("changing seek position"), false)
+	b.mu.Unlock()
+
+	b.setupAsyncReads(errors.New("changing seek position"))
 
 	return nil
 }
 
-func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Context {
-	// In a loop, wait for something to wake you up to try and read more stuff.
-	populateCtx, cancelPopulate := context.WithCancelCause(b.ctx)
-	context.AfterFunc(populateCtx, func() {
-		reason := populateCtx.Err()
-		log.Println(reason)
-	})
+// setupAsyncReads sets up two separate goroutines to read from our backwards
+// and forwards readers to populate the buffer with records.
+//
+// calls to setupAsyncReads run serially because concurrent execution can lead
+// to concurrent reads on the same readers which can mangle the order of
+// appending/prepending into the records buffer, but the read loop itself is
+// lockless.
+//
+// Calling this function will cancel the current populate process before
+// starting the new one.
+func (b *Buffer) setupAsyncReads(restartReason error) {
+	// We need setupAsyncReads to run serially to because concurrent execution
+	// of setupAsyncReads can lead to concurrent reads on the same readers which
+	// can mangle the order of appending/prepending into the records buffer.
+	//
+	// Note: this only locks the setting up of the async reads, not the read
+	// loops themselves.
+	b.muCancelPopulate.Lock()
+	defer b.muCancelPopulate.Unlock()
 
-	// get local references to stuff within a lock to make them consistent
-	// in relation to each other.
-	if withLocks {
-		b.mu.Lock()
+	// When both readers are done we can consider this operation as done.
+	bkdReaderDone := make(chan struct{})
+	fwdReaderDone := make(chan struct{})
+	doneCh := make(chan any)
+	go func() {
+		<-bkdReaderDone
+		<-fwdReaderDone
+		close(doneCh)
+	}()
+
+	// Used to signal the current populate process to abort.
+	innerCtx, innerCancel := context.WithCancelCause(b.ctx)
+
+	// Wrap innerCancel with a function that allows the caller to await the
+	// populate process finishing.
+	cancelPopulate := func(err error) <-chan any {
+		innerCancel(err)
+		return doneCh
 	}
-	b.cancelPopulate(restartReason)
+
+	oldCancelPopulate := b.cancelPopulate
+	b.cancelPopulate = cancelPopulate
+	<-oldCancelPopulate(restartReason)
+
+	// By this point we are guaranteed reader exclusivity, now we need to lock
+	// the buffer itself to get a consistent view of the buffer state.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// At this point its possible that this operation has already been canceled,
+	// so check for it.
+	if innerCtx.Err() != nil {
+		close(bkdReaderDone)
+		close(fwdReaderDone)
+		return
+	}
+
+	// By this point the operation is not canceled and we have exclusive access
+	// to the buffer. Set up the new readers loop.
+
 	bkdToRead, fwdToRead := b.bkdToRead, b.fwdToRead
 	bkdScanner, fwdScanner := b.bkdScanner, b.fwdScanner
 	width, height := b.width, b.height
 	followMode := b.followMode
 	b.cancelPopulate = cancelPopulate
-	if withLocks {
-		b.mu.Unlock()
-	}
-
-	// A function that wakes up whenever we need to read more lines in any direction.
-	// It wakes up on:
-	// - context cancellation
-	// - scrolling events
-	// - eagerness settings change
-	go func() {
-		select {
-		case <-populateCtx.Done():
-		}
-	}()
 
 	go func() {
+		defer close(bkdReaderDone)
+
 		for i := 0; i < bkdToRead; i++ {
-			if populateCtx.Err() != nil {
+			if innerCtx.Err() != nil {
 				return
 			}
 
 			line, pos, err := bkdScanner.ReadLine()
 			if err != nil && !errors.Is(err, io.EOF) {
-				b.setupAsyncReads(fmt.Errorf("failed to populate buffer (backwards read): %w", err), true)
-				return
+				panic(fmt.Errorf("failed to populate buffer (backwards read): %w", err))
 			}
-
-			b.mu.Lock()
 
 			// When EOF is returned with an empty line it doesnt necessarily
 			// mean that an empty line exists at the start of the file. More
 			// likely it means we didn't read anything, so avoid adding this
 			// line to the buffer.
 			if len(line) == 0 && errors.Is(err, io.EOF) {
-				b.mu.Unlock()
 				return
 			}
 
@@ -228,28 +268,23 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 			})
 			b.postEvent(tcell.NewEventInterrupt(nil))
 
-			b.mu.Unlock()
-
-			if populateCtx.Err() != nil {
-				return
-			}
-
 			if errors.Is(err, io.EOF) {
-				break
+				return
 			}
 		}
 	}()
 
 	go func() {
+		defer close(fwdReaderDone)
+
 		for i := 0; i < fwdToRead || followMode; i++ {
-			if populateCtx.Err() != nil {
+			if innerCtx.Err() != nil {
 				return
 			}
 
 			if !fwdScanner.Scan() {
 				if err := fwdScanner.Err(); err != nil {
-					b.setupAsyncReads(fmt.Errorf("failed to populate buffer (forwards read): %w", err), true)
-					return
+					panic(fmt.Errorf("failed to populate buffer (forwards read): %w", err))
 				}
 
 				if followMode {
@@ -264,8 +299,6 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				}
 			}
 
-			b.mu.Lock()
-
 			line := fwdScanner.Bytes()
 			record := newRecord(-1, line, width)
 
@@ -277,16 +310,8 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				return true
 			})
 			b.postEvent(tcell.NewEventInterrupt(nil))
-
-			b.mu.Unlock()
-
-			if populateCtx.Err() != nil {
-				return
-			}
 		}
 	}()
-
-	return populateCtx
 }
 
 // seekAndOrient seeks to a given position and "orients" the buffer. The
