@@ -59,9 +59,9 @@ type Buffer struct {
 	postEvent func(tcell.Event) error
 
 	// A cancel function to stop the current record population process. This
-	// will be called whenever the population should reevaluate what it needs to
-	// populate, etc after resizing the buffer, or changing the buffer's eager
-	// settings.
+	// will be called whenever the current async readers should be disposed. For
+	// example, this will be called before seeking and reorienting the buffer,
+	// or on reader errors.
 	cancelPopulate context.CancelCauseFunc
 }
 
