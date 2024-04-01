@@ -202,10 +202,6 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 			}
 
 			b.mu.Lock()
-			if populateCtx.Err() != nil {
-				b.mu.Unlock()
-				return
-			}
 
 			// When EOF is returned with an empty line it doesnt necessarily
 			// mean that an empty line exists at the start of the file. More
@@ -231,7 +227,12 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				return true
 			})
 			b.postEvent(tcell.NewEventInterrupt(nil))
+
 			b.mu.Unlock()
+
+			if populateCtx.Err() != nil {
+				return
+			}
 
 			if errors.Is(err, io.EOF) {
 				break
@@ -264,10 +265,6 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 			}
 
 			b.mu.Lock()
-			if populateCtx.Err() != nil {
-				b.mu.Unlock()
-				return
-			}
 
 			line := fwdScanner.Bytes()
 			record := newRecord(-1, line, width)
@@ -280,7 +277,12 @@ func (b *Buffer) setupAsyncReads(restartReason error, withLocks bool) context.Co
 				return true
 			})
 			b.postEvent(tcell.NewEventInterrupt(nil))
+
 			b.mu.Unlock()
+
+			if populateCtx.Err() != nil {
+				return
+			}
 		}
 	}()
 
