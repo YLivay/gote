@@ -176,12 +176,6 @@ func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 // Calling this function will cancel the current populate process before
 // starting the new one.
 func (b *Buffer) setupAsyncReads(restartReason error) {
-	// We need setupAsyncReads to run serially to because concurrent execution
-	// of setupAsyncReads can lead to concurrent reads on the same readers which
-	// can mangle the order of appending/prepending into the records buffer.
-	//
-	// Note: this only locks the setting up of the async reads, not the read
-	// loops themselves.
 	b.muCancelPopulate.Lock()
 	defer b.muCancelPopulate.Unlock()
 
