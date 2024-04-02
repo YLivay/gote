@@ -322,7 +322,9 @@ func (l *bufferRecordList) ScrollToBottom(height int) {
 		records.screenTopOffset = len(records.tail.record.lines) - 1
 		records.linesBelowScreenTop = 1
 		records.linesAboveScreenTop = records.linesTotal - 1
-		records.ScrollUp(height)
+		if height > 1 {
+			records.ScrollUp(height - 1)
+		}
 		return true
 	})
 }

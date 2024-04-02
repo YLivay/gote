@@ -15,7 +15,7 @@ func TestThis(t *testing.T) {
 	buffer, err := NewBuffer(10, 10, false, file, context.Background())
 	assert.NoError(t, err)
 
-	buffer.SetEagerness(10, 10)
+	// buffer.SetEagerness(10, 10)
 	err = buffer.SeekAndPopulate(17, io.SeekStart)
 	assert.NoError(t, err)
 

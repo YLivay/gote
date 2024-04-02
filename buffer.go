@@ -45,10 +45,9 @@ type Buffer struct {
 	// How many lines to eagerly preload ahead of the top of the screen.
 	bkdEager int
 
-	// How many lines to read forwards in order to fill the eager buffer.
-	fwdToRead int
-	// How many lines to read backwards in order to fill the eager buffer.
-	bkdToRead int
+	// A function that triggers the async readers to reevaluate how many lines
+	// they need to read in each direction and continue reading if necessary.
+	continueAsyncReads func()
 
 	// The managed list of records loaded by this buffer's scanners.
 	records *bufferRecordList
@@ -78,14 +77,15 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 	}
 
 	buffer := &Buffer{
-		mu:         &sync.Mutex{},
-		ctx:        ctx,
-		width:      width,
-		height:     height,
-		followMode: followMode,
-		fwdReader:  fwdReader,
-		bkdReader:  bkdReader,
-		records:    NewBufferRecordList(),
+		mu:                 &sync.Mutex{},
+		ctx:                ctx,
+		width:              width,
+		height:             height,
+		followMode:         followMode,
+		fwdReader:          fwdReader,
+		bkdReader:          bkdReader,
+		continueAsyncReads: func() {},
+		records:            NewBufferRecordList(),
 		postEvent: func(e tcell.Event) error {
 			return nil
 		},
@@ -97,7 +97,7 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 		},
 	}
 
-	buffer.setupAsyncReads(nil)
+	// buffer.setupAsyncReads(nil)
 
 	return buffer, nil
 }
@@ -152,17 +152,35 @@ func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 		return fmt.Errorf("failed to orient buffer: %w", err)
 	}
 
-	b.records.WithLock(func(records *bufferRecordList) any {
-		records.Clear()
-		b.bkdToRead, b.fwdToRead = b.calcLinesToReadUsingRecords(records)
-		return true
-	})
+	b.records.Clear()
 
 	b.mu.Unlock()
 
 	b.setupAsyncReads(errors.New("changing seek position"))
 
 	return nil
+}
+
+// Scroll scrolls the buffer by the given number of lines. A positive number
+// scrolls down, a negative number scrolls up.
+//
+// Returns the number of lines actually moved. If scrolling down the value will
+// be positive or zero, if scrolling up the value will be negative or zero.
+func (b *Buffer) Scroll(lines int) int {
+	if lines == 0 {
+		return 0
+	}
+
+	var linesMoved int
+	if lines > 0 {
+		linesMoved = b.records.ScrollDown(lines)
+	} else {
+		linesMoved = -b.records.ScrollUp(-lines)
+	}
+
+	b.continueAsyncReads()
+
+	return linesMoved
 }
 
 // setupAsyncReads sets up two separate goroutines to read from our backwards
@@ -179,13 +197,18 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	b.muCancelPopulate.Lock()
 	defer b.muCancelPopulate.Unlock()
 
-	// When both readers are done we can consider this operation as done.
-	bkdReaderDone := make(chan struct{})
-	fwdReaderDone := make(chan struct{})
+	// When both readers are done and the continue channel has been disposed we
+	// can consider this operation as done.
+	bkdReaderDone := make(chan any)
+	fwdReaderDone := make(chan any)
+	continueMu := &sync.Mutex{}
+	continueCh := make(chan any)
+	continueDone := false
 	doneCh := make(chan any)
 	go func() {
 		<-bkdReaderDone
 		<-fwdReaderDone
+		<-continueCh
 		close(doneCh)
 	}()
 
@@ -196,12 +219,43 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	// populate process finishing.
 	cancelPopulate := func(err error) <-chan any {
 		innerCancel(err)
+		go func() {
+			continueMu.Lock()
+			if !continueDone {
+				close(continueCh)
+				continueDone = true
+			}
+			continueMu.Unlock()
+		}()
 		return doneCh
 	}
 
 	oldCancelPopulate := b.cancelPopulate
 	b.cancelPopulate = cancelPopulate
 	<-oldCancelPopulate(restartReason)
+
+	var bkdToRead, fwdToRead int
+	var followMode bool
+
+	b.continueAsyncReads = func() {
+		go func() {
+			if innerCtx.Err() != nil {
+				return
+			}
+
+			b.mu.Lock()
+			bkdToRead, fwdToRead = b.calcLinesToReadUsingRecords(b.records)
+			followMode = b.followMode
+			b.mu.Unlock()
+
+			continueMu.Lock()
+			if !continueDone {
+				close(continueCh)
+				continueCh = make(chan any)
+			}
+			continueMu.Unlock()
+		}()
+	}
 
 	// By this point we are guaranteed reader exclusivity, now we need to lock
 	// the buffer itself to get a consistent view of the buffer state.
@@ -219,51 +273,64 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	// By this point the operation is not canceled and we have exclusive access
 	// to the buffer. Set up the new readers loop.
 
-	bkdToRead, fwdToRead := b.bkdToRead, b.fwdToRead
 	bkdScanner, fwdScanner := b.bkdScanner, b.fwdScanner
 	width, height := b.width, b.height
-	followMode := b.followMode
-	b.cancelPopulate = cancelPopulate
+	bkdToRead, fwdToRead = b.calcLinesToReadUsingRecords(b.records)
+	followMode = b.followMode
 
 	go func() {
 		defer close(bkdReaderDone)
 
-		for i := 0; i < bkdToRead; i++ {
+		myContinueCh := continueCh
+		var myBkdToRead int
+		for {
+			<-myContinueCh
 			if innerCtx.Err() != nil {
 				return
 			}
+			continueMu.Lock()
+			myContinueCh = continueCh
+			myBkdToRead = bkdToRead
+			continueMu.Unlock()
 
-			line, pos, err := bkdScanner.ReadLine()
-			if err != nil && !errors.Is(err, io.EOF) {
-				panic(fmt.Errorf("failed to populate buffer (backwards read): %w", err))
-			}
-
-			// When EOF is returned with an empty line it doesnt necessarily
-			// mean that an empty line exists at the start of the file. More
-			// likely it means we didn't read anything, so avoid adding this
-			// line to the buffer.
-			if len(line) == 0 && errors.Is(err, io.EOF) {
-				return
-			}
-
-			b.records.WithLock(func(records *bufferRecordList) any {
-				r := newRecord(pos, line, width)
-				records.Prepend(r)
-
-				// If prepending but we don't have a full screen of lines yet,
-				// we should scroll up to try and fit more lines on screen.
-				_, onScreen, _ := records.CalcScreenLines(height)
-				canScroll := min(height-onScreen, len(r.lines))
-				if canScroll > 0 {
-					records.ScrollUp(canScroll)
+			for i := 0; i < myBkdToRead; i++ {
+				if innerCtx.Err() != nil {
+					return
 				}
 
-				return true
-			})
-			b.postEvent(tcell.NewEventInterrupt(nil))
+				line, pos, err := bkdScanner.ReadLine()
+				if err != nil && !errors.Is(err, io.EOF) {
+					panic(fmt.Errorf("failed to populate buffer (backwards read): %w", err))
+				}
 
-			if errors.Is(err, io.EOF) {
-				return
+				// When EOF is returned with an empty line it doesnt necessarily
+				// mean that an empty line exists at the start of the file. More
+				// likely it means we didn't read anything, so avoid adding this
+				// line to the buffer.
+				if len(line) == 0 && errors.Is(err, io.EOF) {
+					return
+				}
+
+				b.records.WithLock(func(records *bufferRecordList) any {
+					r := newRecord(pos, line, width)
+					records.Prepend(r)
+
+					// If prepending but we don't have a full screen of lines yet,
+					// we should scroll up to try and fit more lines on screen.
+					_, onScreen, _ := records.CalcScreenLines(height)
+					canScroll := min(height-onScreen, len(r.lines))
+					if canScroll > 0 {
+						records.ScrollUp(canScroll)
+						b.continueAsyncReads()
+					}
+
+					return true
+				})
+				b.postEvent(tcell.NewEventInterrupt(nil))
+
+				if errors.Is(err, io.EOF) {
+					return
+				}
 			}
 		}
 	}()
@@ -271,39 +338,53 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	go func() {
 		defer close(fwdReaderDone)
 
-		for i := 0; i < fwdToRead || followMode; i++ {
+		myContinueCh := continueCh
+		var myFwdToRead int
+		for {
+			<-myContinueCh
 			if innerCtx.Err() != nil {
 				return
 			}
+			continueMu.Lock()
+			myContinueCh = continueCh
+			myFwdToRead = fwdToRead
+			continueMu.Unlock()
 
-			if !fwdScanner.Scan() {
-				if err := fwdScanner.Err(); err != nil {
-					panic(fmt.Errorf("failed to populate buffer (forwards read): %w", err))
-				}
-
-				if followMode {
-					// If EOF, but we're in follow mode, wait a bit and try
-					// reading the file again.
-					<-time.After(10 * time.Millisecond)
-					continue
-				} else {
-					// If EOF and we're not in follow mode, stop. we have
-					// all the data we wanted.
+			for i := 0; i < myFwdToRead || followMode; i++ {
+				if innerCtx.Err() != nil {
 					return
 				}
-			}
 
-			line := fwdScanner.Bytes()
-			record := newRecord(-1, line, width)
+				if !fwdScanner.Scan() {
+					if err := fwdScanner.Err(); err != nil {
+						panic(fmt.Errorf("failed to populate buffer (forwards read): %w", err))
+					}
 
-			b.records.WithLock(func(records *bufferRecordList) any {
-				records.Append(record)
-				if followMode {
-					records.ScrollToBottom(height)
+					if followMode {
+						// If EOF, but we're in follow mode, wait a bit and try
+						// reading the file again.
+						<-time.After(10 * time.Millisecond)
+						continue
+					} else {
+						// If EOF and we're not in follow mode, stop. we have
+						// all the data we wanted.
+						return
+					}
 				}
-				return true
-			})
-			b.postEvent(tcell.NewEventInterrupt(nil))
+
+				line := fwdScanner.Bytes()
+				record := newRecord(-1, line, width)
+
+				b.records.WithLock(func(records *bufferRecordList) any {
+					records.Append(record)
+					if followMode {
+						records.ScrollToBottom(height)
+						b.continueAsyncReads()
+					}
+					return true
+				})
+				b.postEvent(tcell.NewEventInterrupt(nil))
+			}
 		}
 	}()
 }

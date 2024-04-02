@@ -109,16 +109,16 @@ func (a *Application) Run(ctx context.Context, cancelCtx context.CancelFunc) err
 				} else {
 					switch ev.Key() {
 					case tcell.KeyUp:
-						a.buffer.records.ScrollUp(1)
+						a.buffer.Scroll(-1)
 						needsRerender = true
 					case tcell.KeyPgUp:
-						a.buffer.records.ScrollUp(a.height)
+						a.buffer.Scroll(-a.height)
 						needsRerender = true
 					case tcell.KeyDown:
-						a.buffer.records.ScrollDown(1)
+						a.buffer.Scroll(1)
 						needsRerender = true
 					case tcell.KeyPgDn:
-						a.buffer.records.ScrollDown(a.height)
+						a.buffer.Scroll(a.height)
 						needsRerender = true
 					case tcell.KeyEscape:
 					case tcell.KeyCtrlC:
