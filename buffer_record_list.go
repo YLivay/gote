@@ -58,18 +58,19 @@ func (l *bufferRecordList) WithLock(f func(*bufferRecordList) any) any {
 		linesTotal:          l.linesTotal,
 		withinLock:          true,
 	}
-	defer func() {
-		// Assign back to the original instance.
-		l.head = unlockedInst.head
-		l.tail = unlockedInst.tail
-		l.screenTop = unlockedInst.screenTop
-		l.screenTopOffset = unlockedInst.screenTopOffset
-		l.linesAboveScreenTop = unlockedInst.linesAboveScreenTop
-		l.linesBelowScreenTop = unlockedInst.linesBelowScreenTop
-		l.linesTotal = unlockedInst.linesTotal
-	}()
 
-	return f(unlockedInst)
+	result := f(unlockedInst)
+
+	// Assign back to the original instance.
+	l.head = unlockedInst.head
+	l.tail = unlockedInst.tail
+	l.screenTop = unlockedInst.screenTop
+	l.screenTopOffset = unlockedInst.screenTopOffset
+	l.linesAboveScreenTop = unlockedInst.linesAboveScreenTop
+	l.linesBelowScreenTop = unlockedInst.linesBelowScreenTop
+	l.linesTotal = unlockedInst.linesTotal
+
+	return result
 }
 
 // Append adds a record to the end of the list.
@@ -89,13 +90,15 @@ func (l *bufferRecordList) Append(r *record) {
 		l.tail = newRecord
 	}
 
+	numLines := len(r.lines)
 	if l.screenTop == nil {
 		l.screenTop = newRecord
 		l.screenTopOffset = 0
+		l.linesAboveScreenTop = 0
+		l.linesBelowScreenTop = numLines
+	} else {
+		l.linesBelowScreenTop += numLines
 	}
-
-	numLines := len(r.lines)
-	l.linesBelowScreenTop += numLines
 	l.linesTotal += numLines
 }
 
@@ -116,13 +119,15 @@ func (l *bufferRecordList) Prepend(r *record) {
 		l.head = newRecord
 	}
 
+	numLines := len(r.lines)
 	if l.screenTop == nil {
 		l.screenTop = newRecord
 		l.screenTopOffset = 0
+		l.linesAboveScreenTop = 0
+		l.linesBelowScreenTop = numLines
+	} else {
+		l.linesAboveScreenTop += numLines
 	}
-
-	numLines := len(r.lines)
-	l.linesAboveScreenTop += numLines
 	l.linesTotal += numLines
 }
 
@@ -318,10 +323,15 @@ func (l *bufferRecordList) ScrollDown(lines int) int {
 // leaving the given height of lines on the screen.
 func (l *bufferRecordList) ScrollToBottom(height int) {
 	l.WithLock(func(records *bufferRecordList) any {
+		if records.tail == nil {
+			return true
+		}
+
 		records.screenTop = records.tail
 		records.screenTopOffset = len(records.tail.record.lines) - 1
 		records.linesBelowScreenTop = 1
 		records.linesAboveScreenTop = records.linesTotal - 1
+
 		if height > 1 {
 			records.ScrollUp(height - 1)
 		}

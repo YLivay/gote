@@ -201,7 +201,7 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	// can consider this operation as done.
 	bkdReaderDone := make(chan any)
 	fwdReaderDone := make(chan any)
-	continueMu := &sync.Mutex{}
+	continueMu := &sync.RWMutex{}
 	continueCh := make(chan any)
 	continueDone := false
 	doneCh := make(chan any)
@@ -278,20 +278,28 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	bkdToRead, fwdToRead = b.calcLinesToReadUsingRecords(b.records)
 	followMode = b.followMode
 
+	firstBkdRead := true
+	firstFwdRead := true
+
 	go func() {
 		defer close(bkdReaderDone)
 
 		myContinueCh := continueCh
 		var myBkdToRead int
 		for {
-			<-myContinueCh
+			if firstBkdRead {
+				firstBkdRead = false
+			} else {
+				<-myContinueCh
+			}
+
 			if innerCtx.Err() != nil {
 				return
 			}
-			continueMu.Lock()
+			continueMu.RLock()
 			myContinueCh = continueCh
 			myBkdToRead = bkdToRead
-			continueMu.Unlock()
+			continueMu.RUnlock()
 
 			for i := 0; i < myBkdToRead; i++ {
 				if innerCtx.Err() != nil {
@@ -341,14 +349,19 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 		myContinueCh := continueCh
 		var myFwdToRead int
 		for {
-			<-myContinueCh
+			if firstFwdRead {
+				firstFwdRead = false
+			} else {
+				<-myContinueCh
+			}
+
 			if innerCtx.Err() != nil {
 				return
 			}
-			continueMu.Lock()
+			continueMu.RLock()
 			myContinueCh = continueCh
 			myFwdToRead = fwdToRead
-			continueMu.Unlock()
+			continueMu.RUnlock()
 
 			for i := 0; i < myFwdToRead || followMode; i++ {
 				if innerCtx.Err() != nil {
