@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -64,12 +67,23 @@ type Buffer struct {
 	// example, this will be called before seeking and reorienting the buffer,
 	// or on reader errors.
 	cancelPopulate func(err error) <-chan any
+
+	// A logger to use.
+	logger *log.Logger
 }
 
 func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx context.Context) (*Buffer, error) {
 	inputFname := inputReader.Name()
 
 	fwdReader := inputReader
+
+	logfile, err := os.OpenFile("logfile", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	context.AfterFunc(ctx, func() {
+		logfile.Close()
+	})
 
 	bkdReader, err := os.Open(inputFname)
 	if err != nil {
@@ -84,6 +98,8 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 		followMode:         followMode,
 		fwdReader:          fwdReader,
 		bkdReader:          bkdReader,
+		bkdEager:           height * 2,
+		fwdEager:           height * 2,
 		continueAsyncReads: func() {},
 		records:            NewBufferRecordList(),
 		postEvent: func(e tcell.Event) error {
@@ -95,6 +111,7 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 			close(ch)
 			return ch
 		},
+		logger: log.New(logfile, "", log.Ltime|log.Lmicroseconds),
 	}
 
 	// buffer.setupAsyncReads(nil)
@@ -167,16 +184,24 @@ func (b *Buffer) SeekAndPopulate(pos int64, whence int) error {
 // Returns the number of lines actually moved. If scrolling down the value will
 // be positive or zero, if scrolling up the value will be negative or zero.
 func (b *Buffer) Scroll(lines int) int {
+	b.logger.Println("[buffer.Scroll] scrolling buffer by", lines, "lines")
+
 	if lines == 0 {
 		return 0
 	}
 
 	var linesMoved int
-	if lines > 0 {
-		linesMoved = b.records.ScrollDown(lines)
-	} else {
-		linesMoved = -b.records.ScrollUp(-lines)
-	}
+	b.records.WithLock(func(records *bufferRecordList) any {
+		b.logger.Println("[buffer.Scroll] current record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
+		if lines > 0 {
+			linesMoved = records.ScrollDown(lines)
+		} else {
+			linesMoved = -records.ScrollUp(-lines)
+		}
+		b.logger.Println("[buffer.Scroll] scrolled buffer by", linesMoved, "lines")
+		b.logger.Println("[buffer.Scroll] after scrolling record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
+		return true
+	})
 
 	b.continueAsyncReads()
 
@@ -218,42 +243,97 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	// Wrap innerCancel with a function that allows the caller to await the
 	// populate process finishing.
 	cancelPopulate := func(err error) <-chan any {
+		// Generate a short 8 character hex string
+		var buf [4]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			panic(err)
+		}
+		prefix := fmt.Sprintf("[buffer.cancelPopulate %x]", buf[:])
+
+		// log which function called cancelPopulate
+		pc, _, lineNo, ok := runtime.Caller(1)
+		if ok {
+			funcName := runtime.FuncForPC(pc).Name()
+			b.logger.Printf("%s called by %s:%d\n", prefix, funcName, lineNo)
+		} else {
+			b.logger.Println(prefix, "called by unknown")
+		}
+
 		innerCancel(err)
 		go func() {
+			b.logger.Println(prefix, "acquiring continueMu")
 			continueMu.Lock()
+			b.logger.Println(prefix, "acquired continueMu")
 			if !continueDone {
+				b.logger.Println(prefix, "closing continueCh")
 				close(continueCh)
 				continueDone = true
+			} else {
+				b.logger.Println(prefix, "continueCh already closed")
 			}
+			b.logger.Println(prefix, "releasing continueMu")
 			continueMu.Unlock()
+			b.logger.Println(prefix, "released continueMu")
 		}()
 		return doneCh
 	}
 
 	oldCancelPopulate := b.cancelPopulate
 	b.cancelPopulate = cancelPopulate
+	b.logger.Println("[buffer.setupAsyncReads] waiting for old populate process to finish")
 	<-oldCancelPopulate(restartReason)
+	b.logger.Println("[buffer.setupAsyncReads] old populate process finished")
 
 	var bkdToRead, fwdToRead int
 	var followMode bool
 
 	b.continueAsyncReads = func() {
+		// Generate a short 8 character hex string
+		var buf [4]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			panic(err)
+		}
+		prefix := fmt.Sprintf("[buffer.continueAsyncReads %x]", buf[:])
+
+		// log which function called cancelPopulate
+		pc, _, lineNo, ok := runtime.Caller(1)
+		if ok {
+			funcName := runtime.FuncForPC(pc).Name()
+			b.logger.Printf("%s called by %s:%d\n", prefix, funcName, lineNo)
+		} else {
+			b.logger.Println(prefix, "called by unknown")
+		}
+
 		go func() {
 			if innerCtx.Err() != nil {
+				b.logger.Println(prefix, "skipping because innerCtx is canceled")
 				return
 			}
 
+			b.logger.Println(prefix, "acquiring buffer lock")
 			b.mu.Lock()
+			b.logger.Println(prefix, "acquired buffer lock.")
+			b.logger.Println(prefix, "calculating lines to read.")
 			bkdToRead, fwdToRead = b.calcLinesToReadUsingRecords(b.records)
 			followMode = b.followMode
+			b.logger.Println(prefix, "calculated lines to read (bkdToRead =", bkdToRead, ", fwdToRead =", fwdToRead, ").")
+			b.logger.Println(prefix, "releasing buffer lock.")
 			b.mu.Unlock()
+			b.logger.Println(prefix, "released buffer lock.")
 
+			b.logger.Println(prefix, "acquiring continueMu")
 			continueMu.Lock()
+			b.logger.Println(prefix, "acquired continueMu.")
 			if !continueDone {
+				b.logger.Println(prefix, "closing continueCh and opening a new one.")
 				close(continueCh)
 				continueCh = make(chan any)
+			} else {
+				b.logger.Println(prefix, "not closing continueCh because continueDone = true.")
 			}
+			b.logger.Println(prefix, "releasing continueMu.")
 			continueMu.Unlock()
+			b.logger.Println(prefix, "released continueMu.")
 		}()
 	}
 
@@ -281,6 +361,8 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 	firstBkdRead := true
 	firstFwdRead := true
 
+	b.logger.Println("[buffer.setupAsyncReads] starting readers loop (bkdToRead =", bkdToRead, ", fwdToRead =", fwdToRead, ")")
+
 	go func() {
 		defer close(bkdReaderDone)
 
@@ -290,45 +372,66 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 			if firstBkdRead {
 				firstBkdRead = false
 			} else {
+				b.logger.Println("[buffer.bkdReadLoop] waiting for continueCh")
 				<-myContinueCh
+				b.logger.Println("[buffer.bkdReadLoop] got continueCh")
 			}
 
 			if innerCtx.Err() != nil {
+				b.logger.Println("[buffer.bkdReadLoop] innerCtx is canceled, stopping")
 				return
 			}
+
+			b.logger.Println("[buffer.bkdReadLoop] acquiring continueMu for reading")
 			continueMu.RLock()
+			b.logger.Println("[buffer.bkdReadLoop] acquired continueMu for reading")
 			myContinueCh = continueCh
 			myBkdToRead = bkdToRead
+			b.logger.Println("[buffer.bkdReadLoop] will try reading", myBkdToRead, "lines")
+			b.logger.Println("[buffer.bkdReadLoop] releasing continueMu for reading")
 			continueMu.RUnlock()
+			b.logger.Println("[buffer.bkdReadLoop] released continueMu for reading")
 
 			for i := 0; i < myBkdToRead; i++ {
+				b.logger.Println("[buffer.bkdReadLoop] loop", i+1, "of", myBkdToRead)
 				if innerCtx.Err() != nil {
+					b.logger.Println("[buffer.bkdReadLoop] innerCtx is canceled, stopping")
 					return
 				}
 
+				b.logger.Println("[buffer.bkdReadLoop] reading line")
 				line, pos, err := bkdScanner.ReadLine()
 				if err != nil && !errors.Is(err, io.EOF) {
+					b.logger.Println("[buffer.bkdReadLoop] failed to read line:", err.Error())
 					panic(fmt.Errorf("failed to populate buffer (backwards read): %w", err))
 				}
+				b.logger.Println("[buffer.bkdReadLoop] read line:", string(line))
 
 				// When EOF is returned with an empty line it doesnt necessarily
 				// mean that an empty line exists at the start of the file. More
 				// likely it means we didn't read anything, so avoid adding this
 				// line to the buffer.
 				if len(line) == 0 && errors.Is(err, io.EOF) {
+					b.logger.Println("[buffer.bkdReadLoop] EOF with empty line, stopping.")
 					return
 				}
 
 				b.records.WithLock(func(records *bufferRecordList) any {
+					b.logger.Println("[buffer.bkdReadLoop] running with buffer records lock")
 					r := newRecord(pos, line, width)
+					b.logger.Println("[buffer.bkdReadLoop] created record spanning", len(r.lines), "lines")
+					b.logger.Println("[buffer.bkdReadLoop] current record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 					records.Prepend(r)
+					b.logger.Println("[buffer.bkdReadLoop] after prepending record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 
 					// If prepending but we don't have a full screen of lines yet,
 					// we should scroll up to try and fit more lines on screen.
 					_, onScreen, _ := records.CalcScreenLines(height)
 					canScroll := min(height-onScreen, len(r.lines))
 					if canScroll > 0 {
+						b.logger.Println("[buffer.bkdReadLoop] scrolling up", canScroll, "lines")
 						records.ScrollUp(canScroll)
+						b.logger.Println("[buffer.bkdReadLoop] after scrolling up. linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 						b.continueAsyncReads()
 					}
 
@@ -337,6 +440,7 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 				b.postEvent(tcell.NewEventInterrupt(nil))
 
 				if errors.Is(err, io.EOF) {
+					b.logger.Println("[buffer.bkdReadLoop] EOF, stopping")
 					return
 				}
 			}
@@ -352,46 +456,69 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 			if firstFwdRead {
 				firstFwdRead = false
 			} else {
+				b.logger.Println("[buffer.fwdReadLoop] waiting for continueCh")
 				<-myContinueCh
+				b.logger.Println("[buffer.fwdReadLoop] got continueCh")
 			}
 
 			if innerCtx.Err() != nil {
+				b.logger.Println("[buffer.fwdReadLoop] innerCtx is canceled, stopping")
 				return
 			}
+
+			b.logger.Println("[buffer.fwdReadLoop] acquiring continueMu for reading")
 			continueMu.RLock()
+			b.logger.Println("[buffer.fwdReadLoop] acquired continueMu for reading")
 			myContinueCh = continueCh
 			myFwdToRead = fwdToRead
+			b.logger.Println("[buffer.fwdReadLoop] will try reading", myFwdToRead, "lines")
+			b.logger.Println("[buffer.fwdReadLoop] releasing continueMu for reading")
 			continueMu.RUnlock()
+			b.logger.Println("[buffer.fwdReadLoop] released continueMu for reading")
 
 			for i := 0; i < myFwdToRead || followMode; i++ {
+				b.logger.Println("[buffer.fwdReadLoop] loop", i+1, "of", myFwdToRead)
 				if innerCtx.Err() != nil {
+					b.logger.Println("[buffer.fwdReadLoop] innerCtx is canceled, stopping")
 					return
 				}
 
+				b.logger.Println("[buffer.fwdReadLoop] reading line")
 				if !fwdScanner.Scan() {
 					if err := fwdScanner.Err(); err != nil {
+						b.logger.Println("[buffer.fwdReadLoop] failed to read line:", err.Error())
 						panic(fmt.Errorf("failed to populate buffer (forwards read): %w", err))
 					}
 
 					if followMode {
 						// If EOF, but we're in follow mode, wait a bit and try
 						// reading the file again.
-						<-time.After(10 * time.Millisecond)
+						b.logger.Println("[buffer.fwdReadLoop] EOF in follow mode, waiting a bit and trying again")
+						<-time.After(10 * time.Second)
 						continue
 					} else {
 						// If EOF and we're not in follow mode, stop. we have
 						// all the data we wanted.
+						b.logger.Println("[buffer.fwdReadLoop] EOF and not in follow mode, stopping")
 						return
 					}
 				}
 
 				line := fwdScanner.Bytes()
-				record := newRecord(-1, line, width)
+				b.logger.Println("[buffer.fwdReadLoop] read line:", string(line))
 
 				b.records.WithLock(func(records *bufferRecordList) any {
+					b.logger.Println("[buffer.fwdReadLoop] running with buffer records lock")
+					record := newRecord(-1, line, width)
+					b.logger.Println("[buffer.fwdReadLoop] created record spanning", len(record.lines), "lines")
+					b.logger.Println("[buffer.fwdReadLoop] current record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 					records.Append(record)
+					b.logger.Println("[buffer.fwdReadLoop] after appending record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
+
 					if followMode {
+						b.logger.Println("[buffer.fwdReadLoop] scrolling to bottom")
 						records.ScrollToBottom(height)
+						b.logger.Println("[buffer.fwdReadLoop] after scrolling to bottom. linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 						b.continueAsyncReads()
 					}
 					return true
