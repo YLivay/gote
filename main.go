@@ -5,11 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
-
-	"github.com/YLivay/gote/log"
 )
 
 func main() {
@@ -28,7 +27,7 @@ func run() error {
 	cleanupOsSignals := setupOsSignals(ctx, cancelCtx)
 	defer cleanupOsSignals()
 
-	filename := "testfile"
+	filename := "-"
 	reader, cleanupReader, err := prepareReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to prepare reader: %w", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/YLivay/gote/reader"
 	"github.com/gdamore/tcell/v2"
+	"github.com/itchyny/gojq"
 )
 
 type Buffer struct {
@@ -55,6 +57,9 @@ type Buffer struct {
 	// The managed list of records loaded by this buffer's scanners.
 	records *bufferRecordList
 
+	// A compiled jq expression that will be applied to the lines read from the input file.
+	jqExpr *gojq.Code
+
 	// A callback to invoke when an event is received. It will be posted to the
 	// application screen.
 	postEvent func(tcell.Event) error
@@ -90,6 +95,15 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 		return nil, err
 	}
 
+	jqQuery, err := gojq.Parse(". | .time /= 1000 | .time |= todateiso8601 | select(.name | test(\"Pelecard\")) | {time, name, msg}")
+	if err != nil {
+		return nil, err
+	}
+	jqExpr, err := gojq.Compile(jqQuery)
+	if err != nil {
+		return nil, err
+	}
+
 	buffer := &Buffer{
 		mu:                 &sync.Mutex{},
 		ctx:                ctx,
@@ -102,6 +116,7 @@ func NewBuffer(width, height int, followMode bool, inputReader *os.File, ctx con
 		fwdEager:           height * 2,
 		continueAsyncReads: func() {},
 		records:            NewBufferRecordList(),
+		jqExpr:             jqExpr,
 		postEvent: func(e tcell.Event) error {
 			return nil
 		},
@@ -418,7 +433,12 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 
 				b.records.WithLock(func(records *bufferRecordList) any {
 					b.logger.Println("[buffer.bkdReadLoop] running with buffer records lock")
-					r := newRecord(pos, line, width)
+					r := b.parseLine(pos, line, width)
+					if r == nil {
+						myBkdToRead++
+						return false
+					}
+
 					b.logger.Println("[buffer.bkdReadLoop] created record spanning", len(r.lines), "lines")
 					b.logger.Println("[buffer.bkdReadLoop] current record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 					records.Prepend(r)
@@ -494,7 +514,7 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 						// If EOF, but we're in follow mode, wait a bit and try
 						// reading the file again.
 						b.logger.Println("[buffer.fwdReadLoop] EOF in follow mode, waiting a bit and trying again")
-						<-time.After(10 * time.Second)
+						<-time.After(1 * time.Second)
 						continue
 					} else {
 						// If EOF and we're not in follow mode, stop. we have
@@ -509,10 +529,15 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 
 				b.records.WithLock(func(records *bufferRecordList) any {
 					b.logger.Println("[buffer.fwdReadLoop] running with buffer records lock")
-					record := newRecord(-1, line, width)
-					b.logger.Println("[buffer.fwdReadLoop] created record spanning", len(record.lines), "lines")
+					r := b.parseLine(-1, line, width)
+					if r == nil {
+						myFwdToRead++
+						return false
+					}
+
+					b.logger.Println("[buffer.fwdReadLoop] created record spanning", len(r.lines), "lines")
 					b.logger.Println("[buffer.fwdReadLoop] current record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
-					records.Append(record)
+					records.Append(r)
 					b.logger.Println("[buffer.fwdReadLoop] after appending record status: linesAboveScreenTop =", records.linesAboveScreenTop, ", linesBelowScreenTop =", records.linesBelowScreenTop, ", screenTopOffset =", records.screenTopOffset)
 
 					if followMode {
@@ -527,6 +552,36 @@ func (b *Buffer) setupAsyncReads(restartReason error) {
 			}
 		}
 	}()
+}
+
+func (b *Buffer) parseLine(pos int64, line []byte, width int) *record {
+	var data any
+	if err := json.Unmarshal(line, &data); err != nil {
+		return nil
+	}
+
+	var parsed map[string]any
+	var ok bool
+	if parsed, ok = data.(map[string]any); !ok {
+		return nil
+	}
+
+	jqIter := b.jqExpr.Run(parsed)
+	result, ok := jqIter.Next()
+	if !ok {
+		return nil
+	}
+	if _err, ok := result.(error); ok {
+		b.logger.Println("[buffer.parseLine] jq error:", _err.Error())
+		return nil
+	}
+
+	newLine, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+
+	return newRecord(pos, newLine, width)
 }
 
 // seekAndOrient seeks to a given position and "orients" the buffer. The

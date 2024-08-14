@@ -102,7 +102,7 @@ func (l *bufferRecordList) Append(r *record) {
 	l.linesTotal += numLines
 }
 
-// Prepend adds a record to the end of the list.
+// Prepend adds a record to the start of the list.
 func (l *bufferRecordList) Prepend(r *record) {
 	if !l.withinLock {
 		l.mu.Lock()
